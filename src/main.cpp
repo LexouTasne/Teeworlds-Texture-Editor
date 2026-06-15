@@ -11,6 +11,7 @@
 #include <gdiplus.h>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cwctype>
 #include <filesystem>
@@ -76,6 +77,9 @@ struct AppState {
     int pan_x = 0;
     int pan_y = 0;
     POINT last_mouse{};
+    POINT hover_mouse{};
+    bool hover_canvas = false;
+    bool tracking_mouse = false;
     std::unique_ptr<Bitmap> image;
     Rect image_rect;
     Rect preview_rect;
@@ -142,6 +146,7 @@ constexpr int ID_OPTIONS_CLOSE = 1020;
 constexpr int ID_COLOR_PICK = 1021;
 
 void invalidate_tool_ui();
+void choose_brush_color(HWND owner);
 
 std::wstring widen(const std::string& text) {
     if (text.empty()) {
@@ -674,16 +679,16 @@ void layout(HWND hwnd) {
     MoveWindow(g_open, 12, 12, 110, 30, TRUE);
     MoveWindow(g_save_png, 130, 12, 110, 30, TRUE);
     MoveWindow(g_reset, 248, 12, 125, 30, TRUE);
-    MoveWindow(g_select_tool, 390, 12, 90, 30, TRUE);
-    MoveWindow(g_pencil_tool, 488, 12, 80, 30, TRUE);
-    MoveWindow(g_eraser_tool, 576, 12, 90, 30, TRUE);
-    MoveWindow(g_color_pick, 674, 12, 68, 30, TRUE);
-    MoveWindow(g_zoom_out, 758, 12, 34, 30, TRUE);
-    MoveWindow(g_zoom_label, 798, 16, 58, 24, TRUE);
-    MoveWindow(g_zoom_in, 862, 12, 34, 30, TRUE);
-    MoveWindow(g_zoom_fit, 902, 12, 48, 30, TRUE);
-    MoveWindow(g_options, 966, 12, 86, 30, TRUE);
-    MoveWindow(g_show_all, 1068, 16, 160, 24, TRUE);
+    MoveWindow(g_select_tool, 390, 12, 106, 30, TRUE);
+    MoveWindow(g_pencil_tool, 504, 12, 84, 30, TRUE);
+    MoveWindow(g_eraser_tool, 596, 12, 96, 30, TRUE);
+    MoveWindow(g_color_pick, 700, 12, 72, 30, TRUE);
+    MoveWindow(g_zoom_out, 788, 12, 34, 30, TRUE);
+    MoveWindow(g_zoom_label, 828, 16, 58, 24, TRUE);
+    MoveWindow(g_zoom_in, 892, 12, 34, 30, TRUE);
+    MoveWindow(g_zoom_fit, 932, 12, 48, 30, TRUE);
+    MoveWindow(g_options, 996, 12, 92, 30, TRUE);
+    MoveWindow(g_show_all, 1104, 16, 160, 24, TRUE);
     MoveWindow(g_dev_check, width - 150, 16, 135, 24, TRUE);
     MoveWindow(g_templates, 12, top, left - 24, 170, TRUE);
     MoveWindow(g_parts, 12, top + 185, left - 24, height - top - 198 - status_h, TRUE);
@@ -781,6 +786,40 @@ void draw_pixel_grid(Graphics& g) {
     }
 }
 
+void draw_image_checker(Graphics& g) {
+    if (!g_app.image || g_app.image_rect.Width <= 0 || g_app.image_rect.Height <= 0) {
+        return;
+    }
+
+    double scale_x = static_cast<double>(g_app.image_rect.Width) / g_app.image->GetWidth();
+    double scale_y = static_cast<double>(g_app.image_rect.Height) / g_app.image->GetHeight();
+    int source_cell = 8;
+    if (std::min(scale_x, scale_y) < 0.75) {
+        source_cell = 16;
+    }
+    if (std::min(scale_x, scale_y) < 0.35) {
+        source_cell = 32;
+    }
+
+    SolidBrush checker_a(Color(255, 31, 36, 46));
+    SolidBrush checker_b(Color(255, 42, 48, 60));
+    int image_w = static_cast<int>(g_app.image->GetWidth());
+    int image_h = static_cast<int>(g_app.image->GetHeight());
+
+    g.SetClip(g_app.image_rect);
+    for (int sy = 0; sy < image_h; sy += source_cell) {
+        for (int sx = 0; sx < image_w; sx += source_cell) {
+            int left = g_app.image_rect.X + static_cast<int>(std::floor(sx * scale_x));
+            int top = g_app.image_rect.Y + static_cast<int>(std::floor(sy * scale_y));
+            int right = g_app.image_rect.X + static_cast<int>(std::ceil(std::min(sx + source_cell, image_w) * scale_x));
+            int bottom = g_app.image_rect.Y + static_cast<int>(std::ceil(std::min(sy + source_cell, image_h) * scale_y));
+            bool alt = ((sx / source_cell) + (sy / source_cell)) % 2 == 0;
+            g.FillRectangle(alt ? &checker_a : &checker_b, left, top, std::max(1, right - left), std::max(1, bottom - top));
+        }
+    }
+    g.ResetClip();
+}
+
 POINT screen_to_image_point(int x, int y) {
     POINT point{-1, -1};
     if (!g_app.image || g_app.image_rect.Width <= 0 || g_app.image_rect.Height <= 0) {
@@ -848,6 +887,29 @@ void set_zoom(double zoom) {
     InvalidateRect(g_main, nullptr, FALSE);
 }
 
+void set_zoom_at(double zoom, int screen_x, int screen_y) {
+    if (!g_app.image || g_app.image_rect.Width <= 0 || g_app.image_rect.Height <= 0) {
+        set_zoom(zoom);
+        return;
+    }
+
+    POINT image_point = screen_to_image_point(screen_x, screen_y);
+    if (!image_point_inside(image_point)) {
+        set_zoom(zoom);
+        return;
+    }
+    g_app.fit_to_view = false;
+    g_app.zoom = std::max(0.25, std::min(16.0, zoom));
+
+    Rect canvas = canvas_rect(g_main);
+    int scaled_w = static_cast<int>(g_app.image->GetWidth() * g_app.zoom);
+    int scaled_h = static_cast<int>(g_app.image->GetHeight() * g_app.zoom);
+    g_app.pan_x = static_cast<int>(std::round(screen_x - image_point.x * g_app.zoom - canvas.X - (canvas.Width - scaled_w) / 2.0));
+    g_app.pan_y = static_cast<int>(std::round(screen_y - image_point.y * g_app.zoom - canvas.Y - (canvas.Height - scaled_h) / 2.0));
+    update_zoom_label();
+    InvalidateRect(g_main, nullptr, FALSE);
+}
+
 void fit_zoom() {
     g_app.fit_to_view = true;
     g_app.pan_x = 0;
@@ -881,6 +943,60 @@ void paint_at(int screen_x, int screen_y) {
     }
 }
 
+void paint_stroke(int from_x, int from_y, int to_x, int to_y, Tool tool) {
+    POINT start = screen_to_image_point(from_x, from_y);
+    POINT end = screen_to_image_point(to_x, to_y);
+    if (!image_point_inside(start) && !image_point_inside(end)) {
+        return;
+    }
+
+    g_app.brush_size = clamp_int(get_control_int(g_brush_size, g_app.brush_size), 1, 128);
+    Graphics image_g(g_app.image.get());
+    image_g.SetSmoothingMode(Gdiplus::SmoothingModeNone);
+    image_g.SetCompositingMode(tool == Tool::Eraser ? CompositingModeSourceCopy : Gdiplus::CompositingModeSourceOver);
+    Color color = tool == Tool::Eraser
+        ? Color(0, 0, 0, 0)
+        : Color(255, GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color));
+    SolidBrush brush(color);
+
+    int radius = std::max(1, g_app.brush_size);
+    int dx = end.x - start.x;
+    int dy = end.y - start.y;
+    int steps = std::max(1, std::max(std::abs(dx), std::abs(dy)) / std::max(1, radius / 2));
+    int dirty_left = INT_MAX;
+    int dirty_top = INT_MAX;
+    int dirty_right = INT_MIN;
+    int dirty_bottom = INT_MIN;
+
+    for (int i = 0; i <= steps; ++i) {
+        int px = start.x + dx * i / steps;
+        int py = start.y + dy * i / steps;
+        POINT p{px, py};
+        if (!image_point_inside(p)) {
+            continue;
+        }
+        int left = px - radius / 2;
+        int top = py - radius / 2;
+        image_g.FillRectangle(&brush, left, top, radius, radius);
+        dirty_left = std::min(dirty_left, left);
+        dirty_top = std::min(dirty_top, top);
+        dirty_right = std::max(dirty_right, left + radius);
+        dirty_bottom = std::max(dirty_bottom, top + radius);
+    }
+
+    if (dirty_left == INT_MAX) {
+        return;
+    }
+
+    Rect dirty = image_rect_to_screen_rect(dirty_left - 2, dirty_top - 2, dirty_right - dirty_left + 4, dirty_bottom - dirty_top + 4);
+    RECT dirty_win = inflated_win_rect(dirty, 8);
+    InvalidateRect(g_main, &dirty_win, FALSE);
+    if (g_app.preview_rect.Width > 0 && g_app.preview_rect.Height > 0) {
+        RECT preview = inflated_win_rect(g_app.preview_rect, 4);
+        InvalidateRect(g_main, &preview, FALSE);
+    }
+}
+
 void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repaint) {
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
@@ -900,19 +1016,13 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
     SolidBrush canvas_brush(Color(255, 12, 14, 18));
     g.FillRectangle(&canvas_brush, canvas);
 
-    SolidBrush checker_a(Color(255, 26, 30, 38));
-    SolidBrush checker_b(Color(255, 33, 38, 48));
-    RECT canvas_win = to_win_rect(canvas);
-    RECT checker_clip{};
-    IntersectRect(&checker_clip, &repaint, &canvas_win);
-    constexpr int checker = 16;
-    int start_y = canvas.Y + ((checker_clip.top - canvas.Y) / checker) * checker;
-    int start_x = canvas.X + ((checker_clip.left - canvas.X) / checker) * checker;
-    for (int y = start_y; y < checker_clip.bottom; y += checker) {
-        for (int x = start_x; x < checker_clip.right; x += checker) {
-            bool alt = ((x / checker) + (y / checker)) % 2 == 0;
-            g.FillRectangle(alt ? &checker_a : &checker_b, x, y, checker, checker);
-        }
+    Pen canvas_grid(Color(26, 255, 255, 255), 1.0f);
+    constexpr int canvas_grid_step = 32;
+    for (int x = canvas.X + canvas_grid_step; x < canvas.X + canvas.Width; x += canvas_grid_step) {
+        g.DrawLine(&canvas_grid, x, canvas.Y, x, canvas.Y + canvas.Height);
+    }
+    for (int y = canvas.Y + canvas_grid_step; y < canvas.Y + canvas.Height; y += canvas_grid_step) {
+        g.DrawLine(&canvas_grid, canvas.X, y, canvas.X + canvas.Width, y);
     }
 
     Pen frame(Color(180, 92, 205, 255), 2.0f);
@@ -920,6 +1030,7 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
 
     if (g_app.image) {
         g_app.image_rect = fit_image_rect(canvas, g_app.image.get());
+        draw_image_checker(g);
         g.DrawImage(g_app.image.get(), g_app.image_rect);
         draw_pixel_grid(g);
 
@@ -962,6 +1073,35 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
         g_app.preview_rect = Rect();
     }
 
+    if (g_app.image && g_app.hover_canvas && g_app.tool != Tool::Select) {
+        POINT p = screen_to_image_point(g_app.hover_mouse.x, g_app.hover_mouse.y);
+        if (image_point_inside(p)) {
+            double sx = static_cast<double>(g_app.image_rect.Width) / g_app.image->GetWidth();
+            double sy = static_cast<double>(g_app.image_rect.Height) / g_app.image->GetHeight();
+            int size = std::max(4, static_cast<int>(std::round(g_app.brush_size * std::max(sx, sy))));
+            int left = g_app.hover_mouse.x - size / 2;
+            int top = g_app.hover_mouse.y - size / 2;
+            Pen outline(g_app.tool == Tool::Eraser ? Color(240, 255, 120, 120) : Color(240, 255, 255, 255), 1.5f);
+            SolidBrush fill(g_app.tool == Tool::Eraser ? Color(55, 255, 80, 80) : Color(55, GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color)));
+            g.FillEllipse(&fill, left, top, size, size);
+            g.DrawEllipse(&outline, left, top, size, size);
+        }
+    }
+
+    SolidBrush hud_bg(Color(215, 16, 20, 27));
+    SolidBrush hud_text(Color(255, 226, 232, 240));
+    Rect hud(canvas.X + 14, canvas.Y + canvas.Height - 34, 360, 24);
+    g.FillRectangle(&hud_bg, hud);
+    std::wstring hud_label = L"Zoom: " + (g_app.fit_to_view ? std::wstring(L"Fit") : std::to_wstring(static_cast<int>(g_app.zoom * 100.0)) + L"%");
+    if (g_app.image && g_app.hover_canvas) {
+        POINT p = screen_to_image_point(g_app.hover_mouse.x, g_app.hover_mouse.y);
+        if (image_point_inside(p)) {
+            hud_label += L"   Pixel: " + std::to_wstring(p.x) + L", " + std::to_wstring(p.y);
+        }
+    }
+    Gdiplus::FontFamily family(L"Segoe UI");
+    Gdiplus::Font font(&family, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    g.DrawString(hud_label.c_str(), -1, &font, Gdiplus::PointF(static_cast<float>(hud.X + 8), static_cast<float>(hud.Y + 6)), &hud_text);
 }
 
 void paint(HWND hwnd) {
@@ -1091,7 +1231,29 @@ void draw_owner_button(const DRAWITEMSTRUCT* item) {
             if (g_ui_font) {
                 SelectObject(item->hDC, g_ui_font);
             }
-            r.left += 8;
+            if (item->hwndItem == g_parts && g_app.image && item->itemID < static_cast<UINT>(current_template() ? current_template()->parts.size() : 0)) {
+                const Part& part = current_template()->parts[item->itemID];
+                RECT thumb{r.left + 6, r.top + 4, r.left + 34, r.bottom - 4};
+                HBRUSH thumb_bg = CreateSolidBrush(RGB(12, 14, 18));
+                FillRect(item->hDC, &thumb, thumb_bg);
+                DeleteObject(thumb_bg);
+                Graphics thumb_g(item->hDC);
+                thumb_g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
+                int thumb_w = std::max(1, static_cast<int>(thumb.right - thumb.left - 4));
+                int thumb_h = std::max(1, static_cast<int>(thumb.bottom - thumb.top - 4));
+                Rect dest(thumb.left + 2, thumb.top + 2, thumb_w, thumb_h);
+                thumb_g.DrawImage(g_app.image.get(), dest, part.x, part.y, part.w, part.h, Gdiplus::UnitPixel);
+                HPEN thumb_border = CreatePen(PS_SOLID, 1, RGB(75, 86, 104));
+                HGDIOBJ old_pen = SelectObject(item->hDC, thumb_border);
+                HGDIOBJ old_brush = SelectObject(item->hDC, GetStockObject(NULL_BRUSH));
+                Rectangle(item->hDC, thumb.left, thumb.top, thumb.right, thumb.bottom);
+                SelectObject(item->hDC, old_brush);
+                SelectObject(item->hDC, old_pen);
+                DeleteObject(thumb_border);
+                r.left += 42;
+            } else {
+                r.left += 8;
+            }
             DrawTextW(item->hDC, text, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
         return;
@@ -1212,15 +1374,31 @@ void draw_tool_preview(const DRAWITEMSTRUCT* item) {
 LRESULT CALLBACK options_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_CREATE: {
-        CreateWindowExW(0, L"STATIC", L"Opcoes da ferramenta", WS_CHILD | WS_VISIBLE, 16, 14, 220, 24, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        CreateWindowExW(0, L"STATIC", L"Pincel / Borracha", WS_CHILD | WS_VISIBLE, 16, 52, 120, 22, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        HWND title = CreateWindowExW(0, L"STATIC", L"Opcoes da ferramenta", WS_CHILD | WS_VISIBLE, 16, 14, 220, 24, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        HWND label = CreateWindowExW(0, L"STATIC", L"Pincel / Borracha", WS_CHILD | WS_VISIBLE, 16, 52, 120, 22, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
         HWND brush = CreateWindowExW(0, L"EDIT", std::to_wstring(g_app.brush_size).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER, 150, 50, 80, 24, hwnd, reinterpret_cast<HMENU>(ID_OPTIONS), GetModuleHandleW(nullptr), nullptr);
+        HWND hint = CreateWindowExW(0, L"STATIC", L"Botao direito sempre usa borracha rapida.", WS_CHILD | WS_VISIBLE, 16, 88, 300, 22, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        HWND color = CreateWindowExW(0, L"BUTTON", L"Cor do lapis", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 16, 122, 132, 30, hwnd, reinterpret_cast<HMENU>(ID_COLOR_PICK), GetModuleHandleW(nullptr), nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Fechar", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 210, 122, 90, 30, hwnd, reinterpret_cast<HMENU>(ID_OPTIONS_CLOSE), GetModuleHandleW(nullptr), nullptr);
         if (g_ui_font) {
+            SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
+            SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
             SendMessageW(brush, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
+            SendMessageW(hint, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
+            SendMessageW(color, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
+            SendMessageW(close, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
         }
-        CreateWindowExW(0, L"STATIC", L"Botao direito sempre usa borracha rapida.", WS_CHILD | WS_VISIBLE, 16, 88, 300, 22, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        CreateWindowExW(0, L"BUTTON", L"Fechar", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 210, 126, 90, 30, hwnd, reinterpret_cast<HMENU>(ID_OPTIONS_CLOSE), GetModuleHandleW(nullptr), nullptr);
         return 0;
+    }
+    case WM_DRAWITEM:
+        draw_owner_button(reinterpret_cast<DRAWITEMSTRUCT*>(lparam));
+        return TRUE;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT: {
+        HDC dc = reinterpret_cast<HDC>(wparam);
+        SetTextColor(dc, RGB(235, 241, 248));
+        SetBkColor(dc, RGB(20, 25, 33));
+        return reinterpret_cast<LRESULT>(message == WM_CTLCOLOREDIT ? g_edit_brush : g_panel_brush);
     }
     case WM_COMMAND:
         if (LOWORD(wparam) == ID_OPTIONS && HIWORD(wparam) == EN_CHANGE) {
@@ -1228,6 +1406,8 @@ LRESULT CALLBACK options_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
             set_control_int(g_brush_size, g_app.brush_size);
             invalidate_tool_ui();
             set_status(L"Tamanho do pincel atualizado.");
+        } else if (LOWORD(wparam) == ID_COLOR_PICK) {
+            choose_brush_color(hwnd);
         } else if (LOWORD(wparam) == ID_OPTIONS_CLOSE) {
             DestroyWindow(hwnd);
         }
@@ -1305,7 +1485,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_templates = make_child(hwnd, L"LISTBOX", L"", LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_BORDER | WS_VSCROLL, ID_TEMPLATES);
         g_parts = make_child(hwnd, L"LISTBOX", L"", LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_BORDER | WS_VSCROLL, ID_PARTS);
         SendMessageW(g_templates, LB_SETITEMHEIGHT, 0, 25);
-        SendMessageW(g_parts, LB_SETITEMHEIGHT, 0, 25);
+        SendMessageW(g_parts, LB_SETITEMHEIGHT, 0, 34);
         g_status = make_child(hwnd, L"STATIC", L"Pronto.", SS_LEFT, 0);
 
         make_child(hwnd, L"STATIC", L"ID", SS_LEFT, 2001);
@@ -1367,7 +1547,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             g_app.drawing = true;
             g_app.last_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             SetCapture(hwnd);
-            paint_at(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            paint_stroke(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), g_app.tool);
             UpdateWindow(hwnd);
         }
         return 0;
@@ -1389,7 +1569,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             g_app.tool = Tool::Eraser;
             g_app.last_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             SetCapture(hwnd);
-            paint_at(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            paint_stroke(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), Tool::Eraser);
             g_app.tool = previous;
             UpdateWindow(hwnd);
         }
@@ -1417,22 +1597,27 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         }
         return 0;
     case WM_MOUSEMOVE:
+    {
+        POINT old_hover = g_app.hover_mouse;
+        bool old_hover_canvas = g_app.hover_canvas;
+        g_app.hover_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        Rect canvas = canvas_rect(hwnd);
+        g_app.hover_canvas = g_app.hover_mouse.x >= canvas.X
+            && g_app.hover_mouse.y >= canvas.Y
+            && g_app.hover_mouse.x <= canvas.X + canvas.Width
+            && g_app.hover_mouse.y <= canvas.Y + canvas.Height;
+        if (!g_app.tracking_mouse) {
+            TRACKMOUSEEVENT event{};
+            event.cbSize = sizeof(event);
+            event.dwFlags = TME_LEAVE;
+            event.hwndTrack = hwnd;
+            TrackMouseEvent(&event);
+            g_app.tracking_mouse = true;
+        }
         if (g_app.drawing || g_app.right_erasing) {
             int x = GET_X_LPARAM(lparam);
             int y = GET_Y_LPARAM(lparam);
-            int dx = x - g_app.last_mouse.x;
-            int dy = y - g_app.last_mouse.y;
-            int steps = std::max(1, std::max(std::abs(dx), std::abs(dy)) / std::max(1, g_app.brush_size / 2));
-            Tool previous = g_app.tool;
-            if (g_app.right_erasing) {
-                g_app.tool = Tool::Eraser;
-            }
-            for (int i = 1; i <= steps; ++i) {
-                int px = g_app.last_mouse.x + dx * i / steps;
-                int py = g_app.last_mouse.y + dy * i / steps;
-                paint_at(px, py);
-            }
-            g_app.tool = previous;
+            paint_stroke(g_app.last_mouse.x, g_app.last_mouse.y, x, y, g_app.right_erasing ? Tool::Eraser : g_app.tool);
             g_app.last_mouse = {x, y};
             UpdateWindow(hwnd);
         } else if (g_app.panning) {
@@ -1444,12 +1629,32 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             g_app.fit_to_view = false;
             update_zoom_label();
             InvalidateRect(hwnd, nullptr, FALSE);
+        } else {
+            int hover_size = std::max(48, g_app.brush_size + 24);
+            if (old_hover_canvas) {
+                RECT old_rect{old_hover.x - hover_size, old_hover.y - hover_size, old_hover.x + hover_size, old_hover.y + hover_size};
+                InvalidateRect(hwnd, &old_rect, FALSE);
+            }
+            if (g_app.hover_canvas) {
+                RECT new_rect{g_app.hover_mouse.x - hover_size, g_app.hover_mouse.y - hover_size, g_app.hover_mouse.x + hover_size, g_app.hover_mouse.y + hover_size};
+                InvalidateRect(hwnd, &new_rect, FALSE);
+            }
+            RECT hud_rect{canvas.X + 8, canvas.Y + canvas.Height - 42, canvas.X + 390, canvas.Y + canvas.Height - 4};
+            InvalidateRect(hwnd, &hud_rect, FALSE);
         }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        g_app.hover_canvas = false;
+        g_app.tracking_mouse = false;
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     case WM_MOUSEWHEEL:
         if (GET_KEYSTATE_WPARAM(wparam) & MK_CONTROL) {
             int delta = GET_WHEEL_DELTA_WPARAM(wparam);
-            set_zoom((g_app.fit_to_view ? 1.0 : g_app.zoom) * (delta > 0 ? 1.25 : 0.8));
+            POINT zoom_point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            ScreenToClient(hwnd, &zoom_point);
+            set_zoom_at((g_app.fit_to_view ? 1.0 : g_app.zoom) * (delta > 0 ? 1.25 : 0.8), zoom_point.x, zoom_point.y);
             return 0;
         }
         return 0;
