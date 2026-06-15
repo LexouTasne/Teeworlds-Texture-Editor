@@ -73,6 +73,12 @@ void print_help() {
         << "  tte focus --template <id> --part <id> [--input <png>] --output <png>\n";
 }
 
+void wait_for_enter() {
+    std::cout << "\nPressione Enter para sair...";
+    std::string ignored;
+    std::getline(std::cin, ignored);
+}
+
 void print_about() {
     std::cout
         << "Teeworlds Texture Editor " << TTE_VERSION << "\n"
@@ -174,11 +180,65 @@ int run_focus(const Options& options, const char* executable_path) {
     return std::system(command.str().c_str());
 }
 
+int run_interactive(const char* executable_path) {
+    const fs::path root = repo_root(executable_path);
+    const fs::path templates = root / "data" / "templates" / "teeworlds_textures.json";
+    const std::string json = read_file(templates);
+
+    while (true) {
+        std::cout
+            << "Teeworlds Texture Editor " << TTE_VERSION << "\n"
+            << TTE_COPYRIGHT << "\n\n"
+            << "1. Ver informacoes\n"
+            << "2. Listar templates\n"
+            << "3. Listar partes de um template\n"
+            << "4. Gerar preview com foco usando template padrao\n"
+            << "0. Sair\n\n"
+            << "Escolha: ";
+
+        std::string choice;
+        std::getline(std::cin, choice);
+        std::cout << "\n";
+
+        if (choice == "0" || choice == "q" || choice == "Q") {
+            return 0;
+        }
+
+        if (choice == "1") {
+            print_about();
+        } else if (choice == "2") {
+            list_templates(json);
+        } else if (choice == "3") {
+            std::cout << "Template ID (ex: gameskin, skin, hud): ";
+            std::string template_id;
+            std::getline(std::cin, template_id);
+            list_parts(json, template_id);
+        } else if (choice == "4") {
+            Options options;
+            std::cout << "Template ID (ex: gameskin): ";
+            std::getline(std::cin, options.template_id);
+            std::cout << "Parte ID (ex: eye_normal): ";
+            std::getline(std::cin, options.part_id);
+            std::cout << "Arquivo de saida (ex: out\\focus.png): ";
+            std::getline(std::cin, options.output);
+            if (options.output.empty()) {
+                options.output = "out\\focus.png";
+            }
+            return run_focus(options, executable_path);
+        } else {
+            std::cout << "Opcao invalida.\n";
+        }
+
+        std::cout << "\n";
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         if (argc < 2) {
-            print_help();
-            return 0;
+            const int result = run_interactive(argv[0]);
+            wait_for_enter();
+            return result;
         }
 
         const fs::path root = repo_root(argv[0]);

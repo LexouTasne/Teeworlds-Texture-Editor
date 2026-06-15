@@ -30,44 +30,50 @@ Em resumo: um editor para parar de procurar sprite no pixel errado como se fosse
 
 ## Compilar no Windows
 
-### Caminho recomendado para este projeto: MSYS2 UCRT64 + Ninja
+### VS Code / CMake Tools
+
+Este repo ja vem com `CMakePresets.json`. No VS Code:
+
+1. Abra a Command Palette.
+2. Rode `CMake: Select Configure Preset`.
+3. Escolha `Windows UCRT64 Ninja`.
+4. Rode `CMake: Build`.
+
+O executavel fica em:
+
+```text
+build\tte.exe
+```
+
+Ao abrir `tte.exe` sem argumentos, ele mostra um menu interativo e espera Enter antes de sair. Ou seja: nada de terminal piscando e fugindo como ninja de bug.
+
+### PowerShell manual
 
 No PowerShell:
 
 ```powershell
 $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
-$ninja = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe\ninja.exe"
-cmake -S . -B build-ucrt -G Ninja -DCMAKE_MAKE_PROGRAM="$ninja" -DCMAKE_CXX_COMPILER="C:\msys64\ucrt64\bin\g++.exe"
-cmake --build build-ucrt
+cmake --preset windows-ucrt-ninja
+cmake --build build
 ```
 
 Executar:
 
 ```powershell
-.\build-ucrt\tte.exe list
+.\build\tte.exe list
 ```
 
 Criar pacote local com `.exe`, DLLs, templates e scripts:
 
 ```powershell
-cmake --build build-ucrt --target package-local
-.\build-ucrt\dist\TeeworldsTextureEditor-0.1.0\tte.exe about
+cmake --build build --target package-local
+.\build\dist\TeeworldsTextureEditor-0.1.0\tte.exe about
 ```
 
 O pacote fica em:
 
 ```text
-build-ucrt\dist\TeeworldsTextureEditor-0.1.0
-```
-
-### Alternativa: Visual Studio Build Tools
-
-Instale o workload C++ do Visual Studio Build Tools, abra o "Developer PowerShell for VS" e rode:
-
-```powershell
-cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64
-cmake --build build-msvc --config Release
-.\build-msvc\Release\tte.exe list
+build\dist\TeeworldsTextureEditor-0.1.0
 ```
 
 ### Alternativa: MSYS2 sem Ninja
@@ -81,8 +87,8 @@ pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x
 Depois compile:
 
 ```bash
-cmake -S . -B build-ucrt -G Ninja
-cmake --build build-ucrt
+cmake -S . -B build -G Ninja
+cmake --build build
 ```
 
 ## Comandos do editor
@@ -90,19 +96,19 @@ cmake --build build-ucrt
 Ver informacoes do client:
 
 ```powershell
-.\build-ucrt\tte.exe about
+.\build\tte.exe about
 ```
 
 Listar templates:
 
 ```powershell
-.\build-ucrt\tte.exe list
+.\build\tte.exe list
 ```
 
 Listar partes de um template:
 
 ```powershell
-.\build-ucrt\tte.exe parts gameskin
+.\build\tte.exe parts gameskin
 ```
 
 Gerar preview focado em uma parte:
@@ -120,7 +126,7 @@ py scripts\focus_texture.py --template gameskin --part eye_normal --output previ
 Ou pelo executavel C++:
 
 ```powershell
-.\build-ucrt\tte.exe focus --template gameskin --part eye_normal --output preview.png
+.\build\tte.exe focus --template gameskin --part eye_normal --output preview.png
 ```
 
 ## Dependencias
@@ -153,8 +159,8 @@ Para trocar o icone do `.exe`, coloque um arquivo `app.ico` na raiz do projeto o
 Depois rode o CMake novamente:
 
 ```powershell
-cmake -S . -B build-ucrt -G Ninja -DCMAKE_MAKE_PROGRAM="$ninja" -DCMAKE_CXX_COMPILER="C:\msys64\ucrt64\bin\g++.exe"
-cmake --build build-ucrt
+cmake --preset windows-ucrt-ninja
+cmake --build build
 ```
 
 Importante: o Windows exige que o icone seja embutido na hora do build. O executavel nao altera o proprio icone em runtime porque isso seria editar o proprio arquivo `.exe` aberto, uma receita boa para criar erro e cafe frio.
@@ -182,3 +188,4 @@ A ideia e ter uma IA dentro do editor para:
 ## Licenca
 
 MIT.
+

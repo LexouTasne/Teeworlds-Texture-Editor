@@ -1,5 +1,5 @@
 param(
-    [string]$BuildDir = "build-ucrt"
+    [string]$BuildDir = "build"
 )
 
 $ErrorActionPreference = "Stop"
