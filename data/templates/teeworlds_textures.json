@@ -4,8 +4,9 @@
       "id": "gameskin",
       "name": "Game Skin",
       "description": "Sprites principais de armas, projeteis, pickups e efeitos do jogo.",
+      "default_image": "data/defaults/gameskin.png",
       "width": 1024,
-      "height": 1024,
+      "height": 512,
       "parts": [
         { "id": "hook", "label": "Hook", "x": 0, "y": 0, "w": 96, "h": 32 },
         { "id": "hammer", "label": "Hammer", "x": 2, "y": 128, "w": 128, "h": 96 },
@@ -23,6 +24,7 @@
       "id": "skin",
       "name": "Tee Skin",
       "description": "Template de corpo, pes, maos e olhos do tee.",
+      "default_image": "data/defaults/skin.png",
       "width": 256,
       "height": 128,
       "parts": [
@@ -37,6 +39,7 @@
       "id": "hud",
       "name": "HUD",
       "description": "Elementos de interface como vida, armadura e indicadores.",
+      "default_image": "data/defaults/hud.png",
       "width": 512,
       "height": 512,
       "parts": [
@@ -44,6 +47,51 @@
         { "id": "armor", "label": "Armor Icon", "x": 64, "y": 0, "w": 64, "h": 64 },
         { "id": "ammo", "label": "Ammo Indicator", "x": 128, "y": 0, "w": 64, "h": 64 },
         { "id": "cursor", "label": "Cursor", "x": 192, "y": 0, "w": 64, "h": 64 }
+      ]
+    },
+    {
+      "id": "emoticons",
+      "name": "Emoticons",
+      "description": "Balões e expressões visuais usadas no jogo.",
+      "default_image": "data/defaults/emoticons.png",
+      "width": 512,
+      "height": 512,
+      "parts": [
+        { "id": "oops", "label": "Oops", "x": 16, "y": 32, "w": 150, "h": 70 },
+        { "id": "exclamation", "label": "Exclamation", "x": 176, "y": 0, "w": 80, "h": 100 },
+        { "id": "dots", "label": "Dots", "x": 24, "y": 176, "w": 88, "h": 48 },
+        { "id": "sorry", "label": "Sorry", "x": 264, "y": 168, "w": 140, "h": 64 },
+        { "id": "sleep", "label": "Sleep", "x": 24, "y": 376, "w": 100, "h": 80 },
+        { "id": "question", "label": "Question", "x": 400, "y": 392, "w": 96, "h": 80 }
+      ]
+    },
+    {
+      "id": "particles",
+      "name": "Particles",
+      "description": "Fumaça, explosões, brilhos e efeitos de ambiente.",
+      "default_image": "data/defaults/particles.png",
+      "width": 512,
+      "height": 512,
+      "parts": [
+        { "id": "smoke_small", "label": "Small Smoke", "x": 0, "y": 0, "w": 96, "h": 96 },
+        { "id": "smoke_large", "label": "Large Smoke", "x": 96, "y": 0, "w": 128, "h": 96 },
+        { "id": "spark", "label": "Spark", "x": 224, "y": 16, "w": 96, "h": 96 },
+        { "id": "shell", "label": "Shell", "x": 0, "y": 104, "w": 128, "h": 128 },
+        { "id": "star", "label": "Star", "x": 128, "y": 96, "w": 128, "h": 128 },
+        { "id": "explosion", "label": "Explosion", "x": 0, "y": 248, "w": 256, "h": 256 }
+      ]
+    },
+    {
+      "id": "ddrace_logo",
+      "name": "DDRace Network Logo",
+      "description": "Logo/arte de referencia do universo DDRace Network.",
+      "default_image": "data/defaults/ddrace_logo.png",
+      "width": 1024,
+      "height": 384,
+      "parts": [
+        { "id": "tees", "label": "Tee Characters", "x": 0, "y": 64, "w": 384, "h": 220 },
+        { "id": "ddrace", "label": "DDRace Text", "x": 400, "y": 0, "w": 520, "h": 150 },
+        { "id": "network", "label": "Network Text", "x": 400, "y": 144, "w": 560, "h": 150 }
       ]
     }
   ]

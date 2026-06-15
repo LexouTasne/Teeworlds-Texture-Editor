@@ -43,11 +43,11 @@ void print_help() {
         << "Comandos:\n"
         << "  tte list\n"
         << "  tte parts <template>\n"
-        << "  tte focus --template <id> --part <id> --input <png> --output <png>\n";
+        << "  tte focus --template <id> --part <id> [--input <png>] --output <png>\n";
 }
 
 void list_templates(const std::string& json) {
-    const std::regex template_regex(R"("id"\s*:\s*"([^"]+)"\s*,\s*"name"\s*:\s*"([^"]+)")");
+    const std::regex template_regex(R"REGEX("id"\s*:\s*"([^"]+)"\s*,\s*"name"\s*:\s*"([^"]+)")REGEX");
     auto begin = std::sregex_iterator(json.begin(), json.end(), template_regex);
     auto end = std::sregex_iterator();
 
@@ -75,7 +75,7 @@ std::string extract_template_block(const std::string& json, const std::string& t
 
 void list_parts(const std::string& json, const std::string& template_id) {
     const std::string block = extract_template_block(json, template_id);
-    const std::regex part_regex(R"(\{\s*"id"\s*:\s*"([^"]+)"\s*,\s*"label"\s*:\s*"([^"]+)")");
+    const std::regex part_regex(R"REGEX(\{\s*"id"\s*:\s*"([^"]+)"\s*,\s*"label"\s*:\s*"([^"]+)")REGEX");
     auto begin = std::sregex_iterator(block.begin(), block.end(), part_regex);
     auto end = std::sregex_iterator();
 
@@ -116,8 +116,8 @@ Options parse_focus_options(int argc, char** argv) {
         }
     }
 
-    if (options.template_id.empty() || options.part_id.empty() || options.input.empty() || options.output.empty()) {
-        throw std::runtime_error("focus precisa de --template, --part, --input e --output.");
+    if (options.template_id.empty() || options.part_id.empty() || options.output.empty()) {
+        throw std::runtime_error("focus precisa de --template, --part e --output. --input e opcional.");
     }
     return options;
 }
@@ -131,8 +131,10 @@ int run_focus(const Options& options) {
             << quote(script.string())
             << " --template " << quote(options.template_id)
             << " --part " << quote(options.part_id)
-            << " --input " << quote(options.input)
             << " --output " << quote(options.output);
+    if (!options.input.empty()) {
+        command << " --input " << quote(options.input);
+    }
 
     return std::system(command.str().c_str());
 }

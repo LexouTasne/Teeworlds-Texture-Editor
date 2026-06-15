@@ -20,24 +20,67 @@ Em resumo: um editor para parar de procurar sprite no pixel errado como se fosse
 
 - CLI em C++ com comandos iniciais.
 - Banco de templates em JSON.
+- Imagens padrao em `data/defaults/` para usar mesmo sem carregar PNG externo.
 - Ferramenta Python para criar preview com foco em uma parte da textura.
 - Estrutura pronta para evoluir para editor visual.
 - Roadmap do projeto.
 
-## Comandos
+## Compilar no Windows
+
+### Caminho recomendado para este projeto: MSYS2 UCRT64 + Ninja
+
+No PowerShell:
+
+```powershell
+$env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
+$ninja = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe\ninja.exe"
+cmake -S . -B build-ucrt -G Ninja -DCMAKE_MAKE_PROGRAM="$ninja" -DCMAKE_CXX_COMPILER="C:\msys64\ucrt64\bin\g++.exe"
+cmake --build build-ucrt
+```
+
+Executar:
+
+```powershell
+.\build-ucrt\tte.exe list
+```
+
+### Alternativa: Visual Studio Build Tools
+
+Instale o workload C++ do Visual Studio Build Tools, abra o "Developer PowerShell for VS" e rode:
+
+```powershell
+cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64
+cmake --build build-msvc --config Release
+.\build-msvc\Release\tte.exe list
+```
+
+### Alternativa: MSYS2 sem Ninja
+
+Dentro do terminal `MSYS2 UCRT64`, instale as ferramentas:
+
+```bash
+pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+```
+
+Depois compile:
+
+```bash
+cmake -S . -B build-ucrt -G Ninja
+cmake --build build-ucrt
+```
+
+## Comandos do editor
 
 Listar templates:
 
 ```powershell
-cmake -S . -B build
-cmake --build build
-.\build\Debug\tte.exe list
+.\build-ucrt\tte.exe list
 ```
 
 Listar partes de um template:
 
 ```powershell
-.\build\Debug\tte.exe parts gameskin
+.\build-ucrt\tte.exe parts gameskin
 ```
 
 Gerar preview focado em uma parte:
@@ -46,10 +89,16 @@ Gerar preview focado em uma parte:
 py scripts\focus_texture.py --template gameskin --part eye_normal --input caminho\game.png --output preview.png
 ```
 
+Se nao passar `--input`, o editor usa o template padrao:
+
+```powershell
+py scripts\focus_texture.py --template gameskin --part eye_normal --output preview.png
+```
+
 Ou pelo executavel C++:
 
 ```powershell
-.\build\Debug\tte.exe focus --template gameskin --part eye_normal --input caminho\game.png --output preview.png
+.\build-ucrt\tte.exe focus --template gameskin --part eye_normal --output preview.png
 ```
 
 ## Dependencias
@@ -70,6 +119,7 @@ py -m pip install -r requirements.txt
 - `src/`: nucleo C++ do editor e comandos locais.
 - `scripts/`: ferramentas Python para imagem e IA.
 - `data/templates/`: templates e regioes das texturas.
+- `data/defaults/`: imagens padrao usadas quando o usuario nao carrega uma textura.
 - `docs/`: roadmap e notas tecnicas.
 
 ## Futuro da IA

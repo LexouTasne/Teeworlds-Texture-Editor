@@ -8,6 +8,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_FILE = ROOT / "data" / "templates" / "teeworlds_textures.json"
+DEFAULT_IMAGE_DIR = ROOT / "data" / "defaults"
 
 
 def load_template(template_id: str, part_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -22,10 +23,19 @@ def load_template(template_id: str, part_id: str) -> tuple[dict[str, Any], dict[
     raise SystemExit(f"Template '{template_id}' nao existe.")
 
 
+def default_image_for(template_id: str) -> Path:
+    path = DEFAULT_IMAGE_DIR / f"{template_id}.png"
+    if not path.exists():
+        raise SystemExit(
+            f"Nenhuma imagem foi informada e o template padrao nao existe: {path}"
+        )
+    return path
+
+
 def focus_texture(
     template_id: str,
     part_id: str,
-    input_path: Path,
+    input_path: Path | None,
     output_path: Path,
     dim_strength: float,
     focus_scale: float,
@@ -38,6 +48,10 @@ def focus_texture(
         ) from exc
 
     template, part = load_template(template_id, part_id)
+    if input_path is None:
+        input_path = default_image_for(template_id)
+        print(f"Usando template padrao: {input_path}")
+
     image = Image.open(input_path).convert("RGBA")
 
     expected_size = (int(template["width"]), int(template["height"]))
@@ -85,7 +99,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Cria preview com foco em uma parte da textura.")
     parser.add_argument("--template", required=True, help="ID do template, exemplo: gameskin")
     parser.add_argument("--part", required=True, help="ID da parte, exemplo: gun")
-    parser.add_argument("--input", required=True, type=Path, help="Imagem de entrada")
+    parser.add_argument("--input", type=Path, help="Imagem de entrada. Se omitida, usa o template padrao.")
     parser.add_argument("--output", required=True, type=Path, help="Imagem de saida")
     parser.add_argument("--dim", default=0.5, type=float, help="Escurecimento do resto da imagem")
     parser.add_argument("--focus-scale", default=0.7, type=float, help="Tamanho maximo do foco na tela")
