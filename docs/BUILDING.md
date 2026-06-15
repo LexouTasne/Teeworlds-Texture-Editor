@@ -31,7 +31,7 @@ Fluxo:
 3. `CMake: Build`
 4. Abrir `build\tte.exe`
 
-Sem argumentos, o executavel abre um menu interativo e nao fecha sozinho.
+O executavel abre a janela do editor visual.
 
 ## PowerShell manual
 
@@ -58,10 +58,11 @@ cmake --build build
 ## Verificacao
 
 ```powershell
-.\build\tte.exe list
-.\build\tte.exe parts gameskin
-.\build\tte.exe focus --template gameskin --part eye_normal --output out\focus-from-default.png
+.\build\tte.exe
+py scripts\focus_texture.py --template gameskin --part eye_normal --output out\focus-from-default.png
 ```
+
+Na versao atual, o fluxo principal e a janela Windows. A ferramenta Python continua existindo como apoio para gerar previews por script.
 
 ## Pacote sem erro de DLL
 
@@ -91,9 +92,7 @@ Teste de dentro do pacote:
 
 ```powershell
 cd build\dist\TeeworldsTextureEditor-0.1.0
-.\tte.exe about
-.\tte.exe list
-.\tte.exe focus --template particles --part explosion --output package-particles-focus.png
+.\tte.exe
 ```
 
 ## Copyright e icone

@@ -40,13 +40,24 @@ if(WIN32)
     set(TTE_RESOURCE_FILE "${CMAKE_BINARY_DIR}/generated/tte.rc")
 endif()
 
-add_executable(tte src/main.cpp ${TTE_RESOURCE_FILE})
+if(WIN32)
+    add_executable(tte WIN32 src/main.cpp ${TTE_RESOURCE_FILE})
+else()
+    add_executable(tte src/main.cpp ${TTE_RESOURCE_FILE})
+endif()
 
 target_compile_definitions(tte PRIVATE
     TTE_VERSION="${PROJECT_VERSION}"
     TTE_AUTHOR="${TTE_AUTHOR}"
     TTE_COPYRIGHT="${TTE_COPYRIGHT}"
 )
+
+if(WIN32)
+    target_link_libraries(tte PRIVATE gdiplus comdlg32)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_options(tte PRIVATE -municode)
+    endif()
+endif()
 
 function(tte_copy_if_exists dll_name)
     string(MAKE_C_IDENTIFIER "${dll_name}" dll_var)

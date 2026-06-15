@@ -1,6 +1,6 @@
 # Teeworlds Texture Editor
 
-Editor de texturas focado 100% no Teeworlds e derivados, criado para editar `game.png`, skins, HUDs e outros assets do jogo com templates prontos.
+Editor visual de texturas focado 100% no Teeworlds e derivados, criado para editar `game.png`, skins, HUDs e outros assets do jogo com templates prontos.
 
 Versao atual: `0.1.0`
 
@@ -18,7 +18,10 @@ Em resumo: um editor para parar de procurar sprite no pixel errado como se fosse
 
 ## O que ja existe na 0.1
 
-- CLI em C++ com comandos iniciais.
+- App Windows em C++ com interface visual.
+- Canvas para visualizar PNGs e focar partes especificas.
+- Lista de templates e partes editaveis.
+- Modo-dev para configurar `id`, `label`, `x`, `y`, `w` e `h`.
 - Banco de templates em JSON.
 - Imagens padrao em `data/defaults/` para usar mesmo sem carregar PNG externo.
 - Ferramenta Python para criar preview com foco em uma parte da textura.
@@ -39,13 +42,13 @@ Este repo ja vem com `CMakePresets.json`. No VS Code:
 3. Escolha `Windows UCRT64 Ninja`.
 4. Rode `CMake: Build`.
 
-O executavel fica em:
+O executavel visual fica em:
 
 ```text
 build\tte.exe
 ```
 
-Ao abrir `tte.exe` sem argumentos, ele mostra um menu interativo e espera Enter antes de sair. Ou seja: nada de terminal piscando e fugindo como ninja de bug.
+Ao abrir `tte.exe`, ele abre a janela do editor. Nada de terminal piscando e fugindo como ninja de bug.
 
 ### PowerShell manual
 
@@ -60,14 +63,14 @@ cmake --build build
 Executar:
 
 ```powershell
-.\build\tte.exe list
+.\build\tte.exe
 ```
 
 Criar pacote local com `.exe`, DLLs, templates e scripts:
 
 ```powershell
 cmake --build build --target package-local
-.\build\dist\TeeworldsTextureEditor-0.1.0\tte.exe about
+.\build\dist\TeeworldsTextureEditor-0.1.0\tte.exe
 ```
 
 O pacote fica em:
@@ -91,25 +94,21 @@ cmake -S . -B build -G Ninja
 cmake --build build
 ```
 
-## Comandos do editor
+## Usar o editor
 
-Ver informacoes do client:
+Ao abrir `build\tte.exe`:
 
-```powershell
-.\build\tte.exe about
-```
+- escolha o template na lista da esquerda;
+- escolha uma parte, como `eye_normal`, `gun`, `health` ou `explosion`;
+- clique em `Abrir PNG` para carregar uma textura sua;
+- clique em `Template padrao` para voltar ao template interno;
+- use o `Modo-dev` na direita para ajustar IDs e coordenadas;
+- clique em `Aplicar parte` para atualizar a selecao;
+- clique em `Salvar JSON` para gravar em `data/templates/teeworlds_textures.json`.
 
-Listar templates:
+O foco visual escurece o resto da textura e amplia a parte selecionada no painel de preview.
 
-```powershell
-.\build\tte.exe list
-```
-
-Listar partes de um template:
-
-```powershell
-.\build\tte.exe parts gameskin
-```
+## Ferramenta Python opcional
 
 Gerar preview focado em uma parte:
 
@@ -121,12 +120,6 @@ Se nao passar `--input`, o editor usa o template padrao:
 
 ```powershell
 py scripts\focus_texture.py --template gameskin --part eye_normal --output preview.png
-```
-
-Ou pelo executavel C++:
-
-```powershell
-.\build\tte.exe focus --template gameskin --part eye_normal --output preview.png
 ```
 
 ## Dependencias
@@ -144,7 +137,7 @@ py -m pip install -r requirements.txt
 
 ## Arquitetura planejada
 
-- `src/`: nucleo C++ do editor e comandos locais.
+- `src/`: nucleo C++ do editor visual.
 - `scripts/`: ferramentas Python para imagem e IA.
 - `data/templates/`: templates e regioes das texturas.
 - `data/defaults/`: imagens padrao usadas quando o usuario nao carrega uma textura.
