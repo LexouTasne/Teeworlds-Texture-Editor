@@ -1,0 +1,13 @@
+build/
+out/
+.vs/
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.png~
+*.bak
+dist/
+venv/
+.venv/
