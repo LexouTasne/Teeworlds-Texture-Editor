@@ -22,6 +22,9 @@ Em resumo: um editor para parar de procurar sprite no pixel errado como se fosse
 - Banco de templates em JSON.
 - Imagens padrao em `data/defaults/` para usar mesmo sem carregar PNG externo.
 - Ferramenta Python para criar preview com foco em uma parte da textura.
+- Copyright e metadados Windows no executavel: `Lex copyright 2026`.
+- Icone customizavel por `.ico` no build.
+- Copia automatica das DLLs do MinGW ao lado do `.exe`.
 - Estrutura pronta para evoluir para editor visual.
 - Roadmap do projeto.
 
@@ -42,6 +45,19 @@ Executar:
 
 ```powershell
 .\build-ucrt\tte.exe list
+```
+
+Criar pacote local com `.exe`, DLLs, templates e scripts:
+
+```powershell
+cmake --build build-ucrt --target package-local
+.\build-ucrt\dist\TeeworldsTextureEditor-0.1.0\tte.exe about
+```
+
+O pacote fica em:
+
+```text
+build-ucrt\dist\TeeworldsTextureEditor-0.1.0
 ```
 
 ### Alternativa: Visual Studio Build Tools
@@ -70,6 +86,12 @@ cmake --build build-ucrt
 ```
 
 ## Comandos do editor
+
+Ver informacoes do client:
+
+```powershell
+.\build-ucrt\tte.exe about
+```
 
 Listar templates:
 
@@ -120,7 +142,32 @@ py -m pip install -r requirements.txt
 - `scripts/`: ferramentas Python para imagem e IA.
 - `data/templates/`: templates e regioes das texturas.
 - `data/defaults/`: imagens padrao usadas quando o usuario nao carrega uma textura.
+- `assets/icons/`: icones `.ico` para embutir no executavel.
+- `cmake/`: recursos de build, metadata Windows e empacotamento.
 - `docs/`: roadmap e notas tecnicas.
+
+## Icone customizado
+
+Para trocar o icone do `.exe`, coloque um arquivo `app.ico` na raiz do projeto ou qualquer `.ico` em `assets/icons/`.
+
+Depois rode o CMake novamente:
+
+```powershell
+cmake -S . -B build-ucrt -G Ninja -DCMAKE_MAKE_PROGRAM="$ninja" -DCMAKE_CXX_COMPILER="C:\msys64\ucrt64\bin\g++.exe"
+cmake --build build-ucrt
+```
+
+Importante: o Windows exige que o icone seja embutido na hora do build. O executavel nao altera o proprio icone em runtime porque isso seria editar o proprio arquivo `.exe` aberto, uma receita boa para criar erro e cafe frio.
+
+## DLLs do Windows
+
+Quando compilado com MSYS2 UCRT64/GCC, o CMake copia automaticamente:
+
+- `libgcc_s_seh-1.dll`
+- `libstdc++-6.dll`
+- `libwinpthread-1.dll`
+
+Elas ficam ao lado de `tte.exe`, entao o usuario nao precisa instalar o MSYS2 para abrir o client.
 
 ## Futuro da IA
 

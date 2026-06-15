@@ -26,24 +26,59 @@ std::string read_file(const fs::path& path) {
     return buffer.str();
 }
 
-fs::path repo_root() {
-    fs::path current = fs::current_path();
+bool has_project_data(const fs::path& path) {
+    return fs::exists(path / "data" / "templates" / "teeworlds_textures.json");
+}
+
+fs::path find_project_root_from(fs::path current) {
     while (!current.empty()) {
         if (fs::exists(current / "data" / "templates" / "teeworlds_textures.json")) {
             return current;
         }
-        current = current.parent_path();
+        const fs::path parent = current.parent_path();
+        if (parent == current) {
+            break;
+        }
+        current = parent;
     }
+    return {};
+}
+
+fs::path repo_root(const char* executable_path = nullptr) {
+    if (const fs::path from_cwd = find_project_root_from(fs::current_path()); !from_cwd.empty()) {
+        return from_cwd;
+    }
+
+    if (executable_path != nullptr) {
+        std::error_code ignored;
+        fs::path exe = fs::absolute(fs::path(executable_path), ignored);
+        if (!ignored) {
+            if (const fs::path from_exe = find_project_root_from(exe.parent_path()); !from_exe.empty()) {
+                return from_exe;
+            }
+        }
+    }
+
     return fs::current_path();
 }
 
 void print_help() {
     std::cout
         << "Teeworlds Texture Editor " << TTE_VERSION << "\n\n"
+        << TTE_COPYRIGHT << "\n\n"
         << "Comandos:\n"
+        << "  tte about\n"
         << "  tte list\n"
         << "  tte parts <template>\n"
         << "  tte focus --template <id> --part <id> [--input <png>] --output <png>\n";
+}
+
+void print_about() {
+    std::cout
+        << "Teeworlds Texture Editor " << TTE_VERSION << "\n"
+        << TTE_COPYRIGHT << "\n"
+        << "Autor: " << TTE_AUTHOR << "\n"
+        << "Foco: editor de texturas para Teeworlds, DDRace, gameskin, HUD, skins e templates.\n";
 }
 
 void list_templates(const std::string& json) {
@@ -122,8 +157,8 @@ Options parse_focus_options(int argc, char** argv) {
     return options;
 }
 
-int run_focus(const Options& options) {
-    const fs::path root = repo_root();
+int run_focus(const Options& options, const char* executable_path) {
+    const fs::path root = repo_root(executable_path);
     const fs::path script = root / "scripts" / "focus_texture.py";
 
     std::ostringstream command;
@@ -146,9 +181,15 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        const fs::path templates = repo_root() / "data" / "templates" / "teeworlds_textures.json";
+        const fs::path root = repo_root(argv[0]);
+        const fs::path templates = root / "data" / "templates" / "teeworlds_textures.json";
         const std::string json = read_file(templates);
         const std::string command = argv[1];
+
+        if (command == "about") {
+            print_about();
+            return 0;
+        }
 
         if (command == "list") {
             list_templates(json);
@@ -164,7 +205,7 @@ int main(int argc, char** argv) {
         }
 
         if (command == "focus") {
-            return run_focus(parse_focus_options(argc, argv));
+            return run_focus(parse_focus_options(argc, argv), argv[0]);
         }
 
         print_help();

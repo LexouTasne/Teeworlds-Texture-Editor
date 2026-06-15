@@ -49,3 +49,52 @@ cmake --build build-ucrt
 .\build-ucrt\tte.exe parts gameskin
 .\build-ucrt\tte.exe focus --template gameskin --part eye_normal --output out\focus-from-default.png
 ```
+
+## Pacote sem erro de DLL
+
+Depois do build, gere um pacote local:
+
+```powershell
+cmake --build build-ucrt --target package-local
+```
+
+Saida:
+
+```text
+build-ucrt\dist\TeeworldsTextureEditor-0.1.0
+```
+
+Essa pasta contem:
+
+- `tte.exe`
+- DLLs necessarias do MinGW/MSYS2
+- `data/`
+- `scripts/`
+- `requirements.txt`
+- `README.md`
+- `LICENSE`
+
+Teste de dentro do pacote:
+
+```powershell
+cd build-ucrt\dist\TeeworldsTextureEditor-0.1.0
+.\tte.exe about
+.\tte.exe list
+.\tte.exe focus --template particles --part explosion --output package-particles-focus.png
+```
+
+## Copyright e icone
+
+O executavel recebe metadados Windows com:
+
+```text
+Lex copyright 2026
+```
+
+Para trocar o icone:
+
+1. Coloque `app.ico` na raiz do projeto, ou um `.ico` em `assets/icons/`.
+2. Rode o CMake novamente.
+3. Compile.
+
+O CMake embute o icone no recurso Windows do `tte.exe`.
