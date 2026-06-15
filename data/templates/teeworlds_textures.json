@@ -52,7 +52,7 @@
     {
       "id": "emoticons",
       "name": "Emoticons",
-      "description": "Balões e expressões visuais usadas no jogo.",
+      "description": "Baloes e expressoes visuais usadas no jogo.",
       "default_image": "data/defaults/emoticons.png",
       "width": 512,
       "height": 512,
@@ -68,7 +68,7 @@
     {
       "id": "particles",
       "name": "Particles",
-      "description": "Fumaça, explosões, brilhos e efeitos de ambiente.",
+      "description": "Fumaca, explosoes, brilhos e efeitos de ambiente.",
       "default_image": "data/defaults/particles.png",
       "width": 512,
       "height": 512,
@@ -87,7 +87,7 @@
       "description": "Logo/arte de referencia do universo DDRace Network.",
       "default_image": "data/defaults/ddrace_logo.png",
       "width": 1024,
-      "height": 384,
+      "height": 293,
       "parts": [
         { "id": "tees", "label": "Tee Characters", "x": 0, "y": 64, "w": 384, "h": 220 },
         { "id": "ddrace", "label": "DDRace Text", "x": 400, "y": 0, "w": 520, "h": 150 },

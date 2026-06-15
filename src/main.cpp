@@ -55,6 +55,7 @@ struct AppState {
     int selected_template = 0;
     int selected_part = 0;
     bool dev_mode = true;
+    bool show_all_parts = false;
     std::unique_ptr<Image> image;
     Rect image_rect;
     ULONG_PTR gdiplus_token = 0;
@@ -78,6 +79,8 @@ HWND g_delete_part = nullptr;
 HWND g_save = nullptr;
 HWND g_open = nullptr;
 HWND g_reset = nullptr;
+HWND g_show_all = nullptr;
+HFONT g_ui_font = nullptr;
 
 constexpr int ID_TEMPLATES = 1001;
 constexpr int ID_PARTS = 1002;
@@ -88,6 +91,7 @@ constexpr int ID_APPLY = 1006;
 constexpr int ID_NEW = 1007;
 constexpr int ID_DELETE = 1008;
 constexpr int ID_SAVE = 1009;
+constexpr int ID_SHOW_ALL = 1010;
 
 std::wstring widen(const std::string& text) {
     if (text.empty()) {
@@ -353,7 +357,8 @@ void load_image(const fs::path& path) {
         set_status(L"Falha ao carregar imagem.");
         return;
     }
-    set_status(L"Imagem carregada: " + path.filename().wstring());
+    std::wstring size = std::to_wstring(g_app.image->GetWidth()) + L"x" + std::to_wstring(g_app.image->GetHeight());
+    set_status(L"Imagem carregada: " + path.filename().wstring() + L" (" + size + L")");
     InvalidateRect(g_main, nullptr, FALSE);
 }
 
@@ -484,7 +489,7 @@ void layout(HWND hwnd) {
     GetClientRect(hwnd, &client);
     int width = client.right - client.left;
     int height = client.bottom - client.top;
-    int left = 250;
+    int left = 320;
     int top = 56;
     int status_h = 28;
     int dev = g_app.dev_mode ? 285 : 0;
@@ -492,6 +497,7 @@ void layout(HWND hwnd) {
 
     MoveWindow(g_open, 12, 12, 110, 30, TRUE);
     MoveWindow(g_reset, 130, 12, 120, 30, TRUE);
+    MoveWindow(g_show_all, 270, 16, 160, 24, TRUE);
     MoveWindow(g_dev_check, width - 150, 16, 135, 24, TRUE);
     MoveWindow(g_templates, 12, top, left - 24, 170, TRUE);
     MoveWindow(g_parts, 12, top + 185, left - 24, height - top - 198 - status_h, TRUE);
@@ -542,7 +548,7 @@ void layout(HWND hwnd) {
 Rect canvas_rect(HWND hwnd) {
     RECT client{};
     GetClientRect(hwnd, &client);
-    int left = 260;
+    int left = 330;
     int top = 56;
     int right_panel = g_app.dev_mode ? 295 : 10;
     return Rect(left, top, std::max(50, static_cast<int>(client.right) - left - right_panel), std::max(50, static_cast<int>(client.bottom) - top - 38));
@@ -554,7 +560,7 @@ Rect fit_image_rect(const Rect& bounds, Image* image) {
     }
     double iw = static_cast<double>(image->GetWidth());
     double ih = static_cast<double>(image->GetHeight());
-    double scale = std::min(bounds.Width / iw, bounds.Height / ih);
+    double scale = std::min(1.0, std::min(bounds.Width / iw, bounds.Height / ih));
     int w = static_cast<int>(iw * scale);
     int h = static_cast<int>(ih * scale);
     return Rect(bounds.X + (bounds.Width - w) / 2, bounds.Y + (bounds.Height - h) / 2, w, h);
@@ -577,22 +583,36 @@ Rect part_to_screen(const Part& part) {
 void paint(HWND hwnd) {
     PAINTSTRUCT ps{};
     HDC hdc = BeginPaint(hwnd, &ps);
+    RECT client{};
+    GetClientRect(hwnd, &client);
     Graphics g(hdc);
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
     g.Clear(Color(255, 18, 22, 29));
 
     SolidBrush top(Color(255, 27, 33, 43));
-    g.FillRectangle(&top, 0, 0, ps.rcPaint.right, 56);
+    g.FillRectangle(&top, 0, 0, client.right, 56);
 
     SolidBrush panel(Color(255, 24, 29, 38));
-    g.FillRectangle(&panel, 0, 56, 250, ps.rcPaint.bottom);
+    g.FillRectangle(&panel, 0, 56, 320, client.bottom);
     if (g_app.dev_mode) {
-        g.FillRectangle(&panel, ps.rcPaint.right - 295, 56, 295, ps.rcPaint.bottom);
+        g.FillRectangle(&panel, client.right - 295, 56, 295, client.bottom);
     }
 
     Rect canvas = canvas_rect(hwnd);
     SolidBrush canvas_brush(Color(255, 12, 14, 18));
     g.FillRectangle(&canvas_brush, canvas);
+
+    SolidBrush checker_a(Color(255, 26, 30, 38));
+    SolidBrush checker_b(Color(255, 33, 38, 48));
+    constexpr int checker = 16;
+    for (int y = canvas.Y; y < canvas.Y + canvas.Height; y += checker) {
+        for (int x = canvas.X; x < canvas.X + canvas.Width; x += checker) {
+            bool alt = ((x / checker) + (y / checker)) % 2 == 0;
+            g.FillRectangle(alt ? &checker_a : &checker_b, x, y, checker, checker);
+        }
+    }
 
     Pen frame(Color(180, 92, 205, 255), 2.0f);
     g.DrawRectangle(&frame, canvas);
@@ -610,10 +630,22 @@ void paint(HWND hwnd) {
             g.FillRegion(&dim, &dim_region);
 
             Pen cyan(Color(255, 85, 220, 255), 3.0f);
+            if (g_app.show_all_parts) {
+                TextureTemplate* texture = current_template();
+                if (texture) {
+                    Pen soft(Color(150, 85, 220, 255), 1.0f);
+                    for (const Part& each : texture->parts) {
+                        g.DrawRectangle(&soft, part_to_screen(each));
+                    }
+                }
+            }
             g.DrawRectangle(&cyan, highlight);
 
-            int preview_w = std::min(430, std::max(180, canvas.Width / 3));
-            int preview_h = std::min(260, std::max(140, canvas.Height / 3));
+            int max_preview_w = std::max(96, canvas.Width / 3);
+            int max_preview_h = std::max(96, canvas.Height / 3);
+            int zoom = std::max(1, std::min({8, max_preview_w / std::max(1, part->w), max_preview_h / std::max(1, part->h)}));
+            int preview_w = std::max(1, part->w * zoom);
+            int preview_h = std::max(1, part->h * zoom);
             Rect preview(canvas.X + canvas.Width - preview_w - 18, canvas.Y + canvas.Height - preview_h - 18, preview_w, preview_h);
             SolidBrush preview_bg(Color(230, 20, 25, 33));
             g.FillRectangle(&preview_bg, preview);
@@ -651,17 +683,23 @@ void select_part_from_point(int x, int y) {
 }
 
 HWND make_child(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, int id) {
-    return CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, parent, reinterpret_cast<HMENU>(id), GetModuleHandleW(nullptr), nullptr);
+    HWND child = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, parent, reinterpret_cast<HMENU>(id), GetModuleHandleW(nullptr), nullptr);
+    if (g_ui_font) {
+        SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
+    }
+    return child;
 }
 
 LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_CREATE:
         g_main = hwnd;
+        g_ui_font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
         g_open = make_child(hwnd, L"BUTTON", L"Abrir PNG", BS_PUSHBUTTON, ID_OPEN);
         g_reset = make_child(hwnd, L"BUTTON", L"Template padrao", BS_PUSHBUTTON, ID_RESET);
         g_dev_check = make_child(hwnd, L"BUTTON", L"Modo-dev", BS_AUTOCHECKBOX, ID_DEV);
         SendMessageW(g_dev_check, BM_SETCHECK, BST_CHECKED, 0);
+        g_show_all = make_child(hwnd, L"BUTTON", L"Mostrar todas partes", BS_AUTOCHECKBOX, ID_SHOW_ALL);
         g_templates = make_child(hwnd, L"LISTBOX", L"", LBS_NOTIFY | WS_BORDER | WS_VSCROLL, ID_TEMPLATES);
         g_parts = make_child(hwnd, L"LISTBOX", L"", LBS_NOTIFY | WS_BORDER | WS_VSCROLL, ID_PARTS);
         g_status = make_child(hwnd, L"STATIC", L"Pronto.", SS_LEFT, 0);
@@ -720,6 +758,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             g_app.dev_mode = SendMessageW(g_dev_check, BM_GETCHECK, 0, 0) == BST_CHECKED;
             layout(hwnd);
             return 0;
+        case ID_SHOW_ALL:
+            g_app.show_all_parts = SendMessageW(g_show_all, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
         case ID_APPLY:
             apply_dev_fields();
             return 0;
@@ -738,6 +780,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         paint(hwnd);
         return 0;
     case WM_DESTROY:
+        if (g_ui_font) {
+            DeleteObject(g_ui_font);
+            g_ui_font = nullptr;
+        }
         PostQuitMessage(0);
         return 0;
     }
@@ -773,8 +819,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        1280,
-        780,
+        1700,
+        900,
         nullptr,
         nullptr,
         instance,

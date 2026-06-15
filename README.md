@@ -24,6 +24,7 @@ Em resumo: um editor para parar de procurar sprite no pixel errado como se fosse
 - Modo-dev para configurar `id`, `label`, `x`, `y`, `w` e `h`.
 - Banco de templates em JSON.
 - Imagens padrao em `data/defaults/` para usar mesmo sem carregar PNG externo.
+- Render pixel-perfect: sem esticar textura para preencher tela.
 - Ferramenta Python para criar preview com foco em uma parte da textura.
 - Copyright e metadados Windows no executavel: `Lex copyright 2026`.
 - Icone customizavel por `.ico` no build.
@@ -107,6 +108,24 @@ Ao abrir `build\tte.exe`:
 - clique em `Salvar JSON` para gravar em `data/templates/teeworlds_textures.json`.
 
 O foco visual escurece o resto da textura e amplia a parte selecionada no painel de preview.
+
+Importante: o editor usa os PNGs reais que estiverem em `data/defaults/`. Ele nao redesenha essas texturas em runtime. Para usar as imagens oficiais/exatas, substitua os arquivos desta pasta mantendo os nomes:
+
+- `gameskin.png`
+- `skin.png`
+- `hud.png`
+- `emoticons.png`
+- `particles.png`
+- `ddrace_logo.png`
+
+Os defaults incluidos na 0.1 foram baixados do repositório oficial do DDNet:
+
+- https://github.com/ddnet/ddnet/blob/master/data/game.png
+- https://github.com/ddnet/ddnet/blob/master/data/emoticons.png
+- https://github.com/ddnet/ddnet/blob/master/data/hud.png
+- https://github.com/ddnet/ddnet/blob/master/data/particles.png
+- https://github.com/ddnet/ddnet/blob/master/data/gui_logo.png
+- https://github.com/ddnet/ddnet/blob/master/data/skins/default.png
 
 ## Ferramenta Python opcional
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -170,6 +171,9 @@ def main() -> None:
         if drawer is None:
             continue
         output = OUT / f"{template['id']}.png"
+        if output.exists() and os.environ.get("TTE_OVERWRITE_DEFAULTS") != "1":
+            print(f"skipped existing {output}")
+            continue
         drawer(output)
         print(f"created {output}")
 
