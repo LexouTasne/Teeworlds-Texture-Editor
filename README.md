@@ -103,6 +103,7 @@ Ao abrir `build\tte.exe`:
 - escolha uma parte, como `eye_normal`, `gun`, `health` ou `explosion`;
 - clique em `Abrir PNG` para carregar uma textura sua;
 - use `Selecionar`, `Lapis` ou `Borracha` na barra superior;
+- cada ferramenta tem um preview visual no proprio botao;
 - use `-`, `+` e `Fit` para controlar o zoom;
 - use `Ctrl + roda do mouse` para zoom rapido;
 - use botao direito e arraste para mover a textura quando estiver com zoom;
@@ -114,6 +115,8 @@ Ao abrir `build\tte.exe`:
 - clique em `Salvar PNG` para exportar a textura editada.
 
 O foco visual escurece o resto da textura e amplia a parte selecionada no painel de preview.
+
+A interface usa repaint com buffer e atualizacao por regiao suja para evitar aquele efeito de imagem redesenhando de cima para baixo. Clicar no mesmo template tambem nao recarrega a textura inteira sem necessidade.
 
 Nos campos de texto do modo-dev:
 

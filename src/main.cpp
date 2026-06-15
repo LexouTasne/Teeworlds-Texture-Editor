@@ -455,7 +455,11 @@ void set_status(const std::wstring& message) {
     SetWindowTextW(g_status, message.c_str());
 }
 
-void load_image(const fs::path& path) {
+void load_image(const fs::path& path, bool force = false) {
+    std::error_code ignored;
+    if (!force && !g_app.current_image_path.empty() && fs::equivalent(g_app.current_image_path, path, ignored)) {
+        return;
+    }
     g_app.current_image_path = path;
     std::unique_ptr<Bitmap> loaded(Bitmap::FromFile(path.wstring().c_str()));
     if (!loaded || loaded->GetLastStatus() != Gdiplus::Ok) {
@@ -508,13 +512,13 @@ void save_image_as(HWND owner) {
     }
 }
 
-void load_default_image() {
+void load_default_image(bool force = false) {
     TextureTemplate* texture = current_template();
     if (!texture) {
         return;
     }
     fs::path path = g_app.root / texture->default_image;
-    load_image(path);
+    load_image(path, force);
 }
 
 void populate_dev_fields() {
@@ -772,6 +776,9 @@ void set_tool(Tool tool) {
     SendMessageW(g_select_tool, BM_SETCHECK, tool == Tool::Select ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_pencil_tool, BM_SETCHECK, tool == Tool::Pencil ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_eraser_tool, BM_SETCHECK, tool == Tool::Eraser ? BST_CHECKED : BST_UNCHECKED, 0);
+    InvalidateRect(g_select_tool, nullptr, TRUE);
+    InvalidateRect(g_pencil_tool, nullptr, TRUE);
+    InvalidateRect(g_eraser_tool, nullptr, TRUE);
     const wchar_t* name = tool == Tool::Select ? L"Selecionar" : (tool == Tool::Pencil ? L"Lapis" : L"Borracha");
     set_status(std::wstring(L"Ferramenta: ") + name);
 }
@@ -822,12 +829,7 @@ void paint_at(int screen_x, int screen_y) {
     }
 }
 
-void paint(HWND hwnd) {
-    PAINTSTRUCT ps{};
-    HDC hdc = BeginPaint(hwnd, &ps);
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    Graphics g(hdc);
+void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repaint) {
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
     g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
@@ -848,7 +850,6 @@ void paint(HWND hwnd) {
 
     SolidBrush checker_a(Color(255, 26, 30, 38));
     SolidBrush checker_b(Color(255, 33, 38, 48));
-    RECT repaint = ps.rcPaint;
     RECT canvas_win = to_win_rect(canvas);
     RECT checker_clip{};
     IntersectRect(&checker_clip, &repaint, &canvas_win);
@@ -908,6 +909,29 @@ void paint(HWND hwnd) {
         g_app.preview_rect = Rect();
     }
 
+}
+
+void paint(HWND hwnd) {
+    PAINTSTRUCT ps{};
+    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT client{};
+    GetClientRect(hwnd, &client);
+
+    int paint_w = std::max(1, static_cast<int>(ps.rcPaint.right - ps.rcPaint.left));
+    int paint_h = std::max(1, static_cast<int>(ps.rcPaint.bottom - ps.rcPaint.top));
+    HDC memory_dc = CreateCompatibleDC(hdc);
+    HBITMAP memory_bitmap = CreateCompatibleBitmap(hdc, paint_w, paint_h);
+    HGDIOBJ old_bitmap = SelectObject(memory_dc, memory_bitmap);
+    SetViewportOrgEx(memory_dc, -ps.rcPaint.left, -ps.rcPaint.top, nullptr);
+
+    Graphics buffered(memory_dc);
+    render_scene(hwnd, buffered, client, ps.rcPaint);
+    buffered.Flush();
+
+    BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top, paint_w, paint_h, memory_dc, 0, 0, SRCCOPY);
+    SelectObject(memory_dc, old_bitmap);
+    DeleteObject(memory_bitmap);
+    DeleteDC(memory_dc);
     EndPaint(hwnd, &ps);
 }
 
@@ -943,6 +967,91 @@ HWND make_child(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD styl
     return child;
 }
 
+HWND make_button(HWND parent, const wchar_t* text, DWORD style, int id) {
+    return make_child(parent, L"BUTTON", text, style | BS_OWNERDRAW, id);
+}
+
+bool is_checked_button(int id) {
+    if (id == ID_DEV || id == ID_SHOW_ALL || id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER) {
+        return SendMessageW(GetDlgItem(g_main, id), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
+    return false;
+}
+
+void draw_tool_icon(HDC dc, int id, RECT r, COLORREF color) {
+    HPEN pen = CreatePen(PS_SOLID, 2, color);
+    HGDIOBJ old_pen = SelectObject(dc, pen);
+    HBRUSH brush = CreateSolidBrush(color);
+    HGDIOBJ old_brush = SelectObject(dc, brush);
+    int cx = r.left + 15;
+    int cy = r.top + (r.bottom - r.top) / 2;
+    if (id == ID_TOOL_SELECT) {
+        POINT pts[] = {{cx - 4, cy - 8}, {cx + 8, cy}, {cx + 1, cy + 2}, {cx + 5, cy + 10}, {cx + 1, cy + 11}, {cx - 3, cy + 4}, {cx - 8, cy + 9}};
+        Polygon(dc, pts, 7);
+    } else if (id == ID_TOOL_PENCIL) {
+        MoveToEx(dc, cx - 7, cy + 8, nullptr);
+        LineTo(dc, cx + 8, cy - 7);
+        MoveToEx(dc, cx + 4, cy - 9, nullptr);
+        LineTo(dc, cx + 10, cy - 3);
+    } else if (id == ID_TOOL_ERASER) {
+        RoundRect(dc, cx - 9, cy - 6, cx + 9, cy + 7, 4, 4);
+        MoveToEx(dc, cx - 2, cy - 7, nullptr);
+        LineTo(dc, cx + 8, cy + 5);
+    } else if (id == ID_ZOOM_IN || id == ID_ZOOM_OUT) {
+        Ellipse(dc, cx - 7, cy - 7, cx + 5, cy + 5);
+        MoveToEx(dc, cx + 4, cy + 4, nullptr);
+        LineTo(dc, cx + 11, cy + 11);
+        MoveToEx(dc, cx - 4, cy - 1, nullptr);
+        LineTo(dc, cx + 2, cy - 1);
+        if (id == ID_ZOOM_IN) {
+            MoveToEx(dc, cx - 1, cy - 4, nullptr);
+            LineTo(dc, cx - 1, cy + 2);
+        }
+    }
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
+void draw_owner_button(const DRAWITEMSTRUCT* item) {
+    RECT r = item->rcItem;
+    bool pressed = (item->itemState & ODS_SELECTED) != 0;
+    bool checked = is_checked_button(static_cast<int>(item->CtlID));
+    bool disabled = (item->itemState & ODS_DISABLED) != 0;
+
+    COLORREF bg = checked ? RGB(55, 124, 226) : (pressed ? RGB(45, 52, 66) : RGB(31, 37, 48));
+    COLORREF border = checked ? RGB(91, 220, 255) : RGB(75, 86, 104);
+    COLORREF text = disabled ? RGB(120, 128, 140) : RGB(235, 241, 248);
+
+    HBRUSH bg_brush = CreateSolidBrush(bg);
+    HPEN border_pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ old_brush = SelectObject(item->hDC, bg_brush);
+    HGDIOBJ old_pen = SelectObject(item->hDC, border_pen);
+    RoundRect(item->hDC, r.left, r.top, r.right, r.bottom, 7, 7);
+    SelectObject(item->hDC, old_pen);
+    SelectObject(item->hDC, old_brush);
+    DeleteObject(border_pen);
+    DeleteObject(bg_brush);
+
+    SetBkMode(item->hDC, TRANSPARENT);
+    SetTextColor(item->hDC, text);
+    if (g_ui_font) {
+        SelectObject(item->hDC, g_ui_font);
+    }
+
+    int id = static_cast<int>(item->CtlID);
+    bool has_icon = id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER || id == ID_ZOOM_IN || id == ID_ZOOM_OUT;
+    if (has_icon) {
+        draw_tool_icon(item->hDC, id, r, text);
+        r.left += 28;
+    }
+
+    wchar_t label[128] = {};
+    GetWindowTextW(item->hwndItem, label, 128);
+    DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
 void subclass_edit(HWND hwnd) {
     if (!g_edit_proc) {
         g_edit_proc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_WNDPROC));
@@ -955,19 +1064,19 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_CREATE: {
         g_main = hwnd;
         g_ui_font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-        g_open = make_child(hwnd, L"BUTTON", L"Abrir PNG", BS_PUSHBUTTON, ID_OPEN);
-        g_save_png = make_child(hwnd, L"BUTTON", L"Salvar PNG", BS_PUSHBUTTON, ID_SAVE_PNG);
-        g_reset = make_child(hwnd, L"BUTTON", L"Template padrao", BS_PUSHBUTTON, ID_RESET);
-        g_select_tool = make_child(hwnd, L"BUTTON", L"Selecionar", BS_AUTORADIOBUTTON, ID_TOOL_SELECT);
-        g_pencil_tool = make_child(hwnd, L"BUTTON", L"Lapis", BS_AUTORADIOBUTTON, ID_TOOL_PENCIL);
-        g_eraser_tool = make_child(hwnd, L"BUTTON", L"Borracha", BS_AUTORADIOBUTTON, ID_TOOL_ERASER);
-        g_zoom_out = make_child(hwnd, L"BUTTON", L"-", BS_PUSHBUTTON, ID_ZOOM_OUT);
+        g_open = make_button(hwnd, L"Abrir PNG", BS_PUSHBUTTON, ID_OPEN);
+        g_save_png = make_button(hwnd, L"Salvar PNG", BS_PUSHBUTTON, ID_SAVE_PNG);
+        g_reset = make_button(hwnd, L"Template padrao", BS_PUSHBUTTON, ID_RESET);
+        g_select_tool = make_button(hwnd, L"Selecionar", BS_AUTORADIOBUTTON, ID_TOOL_SELECT);
+        g_pencil_tool = make_button(hwnd, L"Lapis", BS_AUTORADIOBUTTON, ID_TOOL_PENCIL);
+        g_eraser_tool = make_button(hwnd, L"Borracha", BS_AUTORADIOBUTTON, ID_TOOL_ERASER);
+        g_zoom_out = make_button(hwnd, L"-", BS_PUSHBUTTON, ID_ZOOM_OUT);
         g_zoom_label = make_child(hwnd, L"STATIC", L"Fit", SS_CENTER, 0);
-        g_zoom_in = make_child(hwnd, L"BUTTON", L"+", BS_PUSHBUTTON, ID_ZOOM_IN);
-        g_zoom_fit = make_child(hwnd, L"BUTTON", L"Fit", BS_PUSHBUTTON, ID_ZOOM_FIT);
-        g_dev_check = make_child(hwnd, L"BUTTON", L"Modo-dev", BS_AUTOCHECKBOX, ID_DEV);
+        g_zoom_in = make_button(hwnd, L"+", BS_PUSHBUTTON, ID_ZOOM_IN);
+        g_zoom_fit = make_button(hwnd, L"Fit", BS_PUSHBUTTON, ID_ZOOM_FIT);
+        g_dev_check = make_button(hwnd, L"Modo-dev", BS_AUTOCHECKBOX, ID_DEV);
         SendMessageW(g_dev_check, BM_SETCHECK, BST_CHECKED, 0);
-        g_show_all = make_child(hwnd, L"BUTTON", L"Mostrar todas partes", BS_AUTOCHECKBOX, ID_SHOW_ALL);
+        g_show_all = make_button(hwnd, L"Mostrar todas partes", BS_AUTOCHECKBOX, ID_SHOW_ALL);
         g_templates = make_child(hwnd, L"LISTBOX", L"", LBS_NOTIFY | WS_BORDER | WS_VSCROLL, ID_TEMPLATES);
         g_parts = make_child(hwnd, L"LISTBOX", L"", LBS_NOTIFY | WS_BORDER | WS_VSCROLL, ID_PARTS);
         g_status = make_child(hwnd, L"STATIC", L"Pronto.", SS_LEFT, 0);
@@ -986,10 +1095,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_w = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_NUMBER, 0);
         g_h = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_NUMBER, 0);
         g_brush_size = make_child(hwnd, L"EDIT", L"8", WS_BORDER | ES_NUMBER, 0);
-        g_apply = make_child(hwnd, L"BUTTON", L"Aplicar parte", BS_PUSHBUTTON, ID_APPLY);
-        g_new_part = make_child(hwnd, L"BUTTON", L"Nova parte", BS_PUSHBUTTON, ID_NEW);
-        g_delete_part = make_child(hwnd, L"BUTTON", L"Remover parte", BS_PUSHBUTTON, ID_DELETE);
-        g_save = make_child(hwnd, L"BUTTON", L"Salvar JSON", BS_PUSHBUTTON, ID_SAVE);
+        g_apply = make_button(hwnd, L"Aplicar parte", BS_PUSHBUTTON, ID_APPLY);
+        g_new_part = make_button(hwnd, L"Nova parte", BS_PUSHBUTTON, ID_NEW);
+        g_delete_part = make_button(hwnd, L"Remover parte", BS_PUSHBUTTON, ID_DELETE);
+        g_save = make_button(hwnd, L"Salvar JSON", BS_PUSHBUTTON, ID_SAVE);
         HWND edits[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_brush_size};
         for (HWND edit : edits) {
             subclass_edit(edit);
@@ -1005,6 +1114,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_SIZE:
         layout(hwnd);
         return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_DRAWITEM:
+        draw_owner_button(reinterpret_cast<DRAWITEMSTRUCT*>(lparam));
+        return TRUE;
     case WM_LBUTTONDOWN:
         SetFocus(hwnd);
         if (g_app.tool == Tool::Select) {
@@ -1071,7 +1185,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         switch (LOWORD(wparam)) {
         case ID_TEMPLATES:
             if (HIWORD(wparam) == LBN_SELCHANGE) {
-                g_app.selected_template = static_cast<int>(SendMessageW(g_templates, LB_GETCURSEL, 0, 0));
+                int next_template = static_cast<int>(SendMessageW(g_templates, LB_GETCURSEL, 0, 0));
+                if (next_template == g_app.selected_template) {
+                    return 0;
+                }
+                g_app.selected_template = next_template;
                 g_app.selected_part = 0;
                 rebuild_parts();
                 load_default_image();
@@ -1091,7 +1209,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             save_image_as(hwnd);
             return 0;
         case ID_RESET:
-            load_default_image();
+            load_default_image(true);
             return 0;
         case ID_TOOL_SELECT:
             set_tool(Tool::Select);
