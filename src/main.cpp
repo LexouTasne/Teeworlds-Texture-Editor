@@ -64,7 +64,7 @@ struct AppState {
     std::vector<TextureTemplate> templates;
     int selected_template = 0;
     int selected_part = 0;
-    bool dev_mode = true;
+    bool dev_mode = false;
     bool show_all_parts = false;
     bool fit_to_view = true;
     bool drawing = false;
@@ -706,11 +706,11 @@ void layout(HWND hwnd) {
     MoveWindow(g_color_pick, canvas_x + 132, UI_MENU_H + 7, 92, 30, TRUE);
     MoveWindow(g_show_all, canvas_x + 236, UI_MENU_H + 9, 158, 26, TRUE);
 
-    MoveWindow(g_templates, left_panel_x + 8, content_top + 10, left_panel_w - 16, 166, TRUE);
-    MoveWindow(g_parts, left_panel_x + 8, content_top + 188, left_panel_w - 16, height - content_top - 208 - UI_STATUS_H, TRUE);
+    MoveWindow(g_templates, left_panel_x + 8, content_top + 42, left_panel_w - 16, 148, TRUE);
+    MoveWindow(g_parts, left_panel_x + 8, content_top + 222, left_panel_w - 16, height - content_top - 242 - UI_STATUS_H, TRUE);
     MoveWindow(g_status, 0, height - UI_STATUS_H, width, UI_STATUS_H, TRUE);
 
-    int y = content_top + 12;
+    int y = content_top + 46;
     auto place = [&](HWND label, HWND edit) {
         MoveWindow(label, right_x, y, 70, 22, TRUE);
         MoveWindow(edit, right_x + 78, y, right_panel_w - 100, 24, TRUE);
@@ -1015,35 +1015,66 @@ void paint_stroke(int from_x, int from_y, int to_x, int to_y, Tool tool) {
     }
 }
 
+void draw_section_label(Graphics& g, const wchar_t* title, const wchar_t* subtitle, int x, int y, int w) {
+    SolidBrush title_brush(Color(255, 244, 244, 244));
+    SolidBrush subtitle_brush(Color(255, 166, 166, 170));
+    SolidBrush dot(Color(255, 0, 158, 205));
+    Gdiplus::FontFamily family(L"Segoe UI");
+    Gdiplus::Font title_font(&family, 12.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+    Gdiplus::Font subtitle_font(&family, 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    g.FillEllipse(&dot, x, y + 5, 7, 7);
+    g.DrawString(title, -1, &title_font, Gdiplus::PointF(static_cast<float>(x + 13), static_cast<float>(y)), &title_brush);
+    if (subtitle && subtitle[0]) {
+        g.DrawString(subtitle, -1, &subtitle_font, Gdiplus::PointF(static_cast<float>(x + 13), static_cast<float>(y + 15)), &subtitle_brush);
+    }
+    Pen line(Color(38, 255, 255, 255), 1.0f);
+    g.DrawLine(&line, x, y + 31, x + w, y + 31);
+}
+
+void draw_panel_shell(Graphics& g, const Rect& rect, Color fill, Color border) {
+    SolidBrush brush(fill);
+    Pen pen(border, 1.0f);
+    g.FillRectangle(&brush, rect);
+    g.DrawRectangle(&pen, rect);
+
+    Pen top_light(Color(36, 255, 255, 255), 1.0f);
+    g.DrawLine(&top_light, rect.X + 1, rect.Y + 1, rect.X + rect.Width - 2, rect.Y + 1);
+}
+
 void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repaint) {
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
     g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
     g.Clear(Color(255, 5, 5, 6));
 
-    Pen background_grid(Color(14, 255, 255, 255), 1.0f);
-    for (int x = 0; x < client.right; x += 26) {
+    Pen background_grid(Color(10, 255, 255, 255), 1.0f);
+    int bg_start_x = (repaint.left / 26) * 26;
+    int bg_start_y = (repaint.top / 26) * 26;
+    for (int x = bg_start_x; x < repaint.right; x += 26) {
         g.DrawLine(&background_grid, x, 0, x, client.bottom);
     }
-    for (int y = 0; y < client.bottom; y += 26) {
+    for (int y = bg_start_y; y < repaint.bottom; y += 26) {
         g.DrawLine(&background_grid, 0, y, client.right, y);
     }
 
-    SolidBrush menu(Color(238, 8, 8, 10));
+    SolidBrush menu(Color(245, 6, 7, 9));
     g.FillRectangle(&menu, 0, 0, client.right, UI_MENU_H);
 
-    SolidBrush options(Color(245, 18, 19, 23));
+    SolidBrush options(Color(245, 18, 20, 25));
     g.FillRectangle(&options, 0, UI_MENU_H, client.right, UI_OPTIONS_H);
     Pen split(Color(46, 255, 255, 255), 1.0f);
     g.DrawLine(&split, 0, UI_MENU_H - 1, client.right, UI_MENU_H - 1);
     g.DrawLine(&split, 0, UI_MENU_H + UI_OPTIONS_H - 1, client.right, UI_MENU_H + UI_OPTIONS_H - 1);
 
-    SolidBrush toolbar(Color(238, 18, 20, 24));
+    SolidBrush toolbar(Color(246, 16, 18, 22));
     g.FillRectangle(&toolbar, 0, UI_MENU_H + UI_OPTIONS_H, UI_TOOLBAR_W, client.bottom);
+    Pen toolbar_line(Color(44, 255, 255, 255), 1.0f);
+    g.DrawLine(&toolbar_line, UI_TOOLBAR_W - 1, UI_MENU_H + UI_OPTIONS_H, UI_TOOLBAR_W - 1, client.bottom - UI_STATUS_H);
 
-    SolidBrush panel(Color(232, 15, 18, 24));
-    g.FillRectangle(&panel, UI_TOOLBAR_W, UI_MENU_H + UI_OPTIONS_H, UI_LEFT_PANEL_W, client.bottom);
-    g.FillRectangle(&panel, client.right - UI_RIGHT_PANEL_W, UI_MENU_H + UI_OPTIONS_H, UI_RIGHT_PANEL_W, client.bottom);
+    Rect left_panel(UI_TOOLBAR_W, UI_MENU_H + UI_OPTIONS_H, UI_LEFT_PANEL_W, client.bottom - UI_MENU_H - UI_OPTIONS_H - UI_STATUS_H);
+    Rect right_panel(client.right - UI_RIGHT_PANEL_W, UI_MENU_H + UI_OPTIONS_H, UI_RIGHT_PANEL_W, client.bottom - UI_MENU_H - UI_OPTIONS_H - UI_STATUS_H);
+    draw_panel_shell(g, left_panel, Color(235, 12, 15, 21), Color(54, 255, 255, 255));
+    draw_panel_shell(g, right_panel, Color(235, 12, 15, 21), Color(54, 255, 255, 255));
 
     SolidBrush brand(Color(255, 244, 244, 244));
     SolidBrush muted(Color(255, 166, 166, 170));
@@ -1052,21 +1083,30 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
     Gdiplus::Font small_font(&brand_family, 10.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
     g.DrawString(L"LexTeeworlds", -1, &brand_font, Gdiplus::PointF(470.0f, 9.0f), &brand);
     g.DrawString(L"Texture IDE 0.1", -1, &small_font, Gdiplus::PointF(570.0f, 11.0f), &muted);
+    Pen brand_line(Color(255, 0, 158, 205), 2.0f);
+    g.DrawLine(&brand_line, 470, 29, 558, 29);
+    draw_section_label(g, L"Templates", L"Texturas oficiais", UI_TOOLBAR_W + 16, UI_MENU_H + UI_OPTIONS_H + 8, UI_LEFT_PANEL_W - 32);
+    draw_section_label(g, L"Partes", L"Areas editaveis", UI_TOOLBAR_W + 16, UI_MENU_H + UI_OPTIONS_H + 185, UI_LEFT_PANEL_W - 32);
+    draw_section_label(g, g_app.dev_mode ? L"Modo-dev" : L"Ferramenta", g_app.dev_mode ? L"IDs, JSON e preview" : L"Preview e atalhos", client.right - UI_RIGHT_PANEL_W + 16, UI_MENU_H + UI_OPTIONS_H + 8, UI_RIGHT_PANEL_W - 32);
 
     Rect canvas = canvas_rect(hwnd);
-    SolidBrush canvas_brush(Color(255, 12, 14, 18));
+    SolidBrush canvas_brush(Color(255, 9, 11, 15));
     g.FillRectangle(&canvas_brush, canvas);
 
     Pen canvas_grid(Color(26, 255, 255, 255), 1.0f);
     constexpr int canvas_grid_step = 32;
-    for (int x = canvas.X + canvas_grid_step; x < canvas.X + canvas.Width; x += canvas_grid_step) {
+    int canvas_start_x = canvas.X + std::max(1, static_cast<int>((repaint.left - canvas.X) / canvas_grid_step)) * canvas_grid_step;
+    int canvas_start_y = canvas.Y + std::max(1, static_cast<int>((repaint.top - canvas.Y) / canvas_grid_step)) * canvas_grid_step;
+    int canvas_end_x = std::min(canvas.X + canvas.Width, static_cast<int>(repaint.right));
+    int canvas_end_y = std::min(canvas.Y + canvas.Height, static_cast<int>(repaint.bottom));
+    for (int x = canvas_start_x; x < canvas_end_x; x += canvas_grid_step) {
         g.DrawLine(&canvas_grid, x, canvas.Y, x, canvas.Y + canvas.Height);
     }
-    for (int y = canvas.Y + canvas_grid_step; y < canvas.Y + canvas.Height; y += canvas_grid_step) {
+    for (int y = canvas_start_y; y < canvas_end_y; y += canvas_grid_step) {
         g.DrawLine(&canvas_grid, canvas.X, y, canvas.X + canvas.Width, y);
     }
 
-    Pen frame(Color(180, 92, 205, 255), 2.0f);
+    Pen frame(Color(210, 0, 158, 205), 2.0f);
     g.DrawRectangle(&frame, canvas);
 
     if (g_app.image) {
@@ -1086,26 +1126,6 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
             }
 
             Pen cyan(Color(255, 85, 220, 255), 3.0f);
-            if (g_app.show_all_parts) {
-                TextureTemplate* texture = current_template();
-                if (texture) {
-                    Pen soft(Color(255, 0, 220, 255), 2.0f);
-                    SolidBrush part_fill(Color(34, 0, 220, 255));
-                    SolidBrush label_bg(Color(225, 5, 5, 6));
-                    SolidBrush label_text(Color(255, 244, 244, 244));
-                    Gdiplus::FontFamily label_family(L"Segoe UI");
-                    Gdiplus::Font label_font(&label_family, 10.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-                    for (const Part& each : texture->parts) {
-                        Rect part_rect = part_to_screen(each);
-                        g.FillRectangle(&part_fill, part_rect);
-                        g.DrawRectangle(&soft, part_rect);
-                        std::wstring name = widen(each.id);
-                        Rect label_rect(part_rect.X, std::max(g_app.image_rect.Y, part_rect.Y - 20), std::max(58, static_cast<int>(name.size()) * 8 + 12), 18);
-                        g.FillRectangle(&label_bg, label_rect);
-                        g.DrawString(name.c_str(), -1, &label_font, Gdiplus::PointF(static_cast<float>(label_rect.X + 5), static_cast<float>(label_rect.Y + 5)), &label_text);
-                    }
-                }
-            }
             g.DrawRectangle(&cyan, highlight);
 
             int max_preview_w = std::max(96, canvas.Width / 3);
@@ -1127,11 +1147,12 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
         g_app.preview_rect = Rect();
     }
 
-    if (g_app.image && g_app.show_all_parts) {
+    bool show_all_parts = g_app.show_all_parts || (g_show_all && SendMessageW(g_show_all, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    if (g_app.image && show_all_parts) {
         TextureTemplate* texture = current_template();
         if (texture) {
-            Pen overlay_pen(Color(255, 0, 220, 255), 2.5f);
-            SolidBrush overlay_fill(Color(38, 0, 220, 255));
+            Pen overlay_pen(Color(255, 0, 190, 240), 2.5f);
+            SolidBrush overlay_fill(Color(42, 0, 158, 205));
             SolidBrush label_bg(Color(232, 5, 5, 6));
             SolidBrush label_text(Color(255, 244, 244, 244));
             Gdiplus::FontFamily overlay_family(L"Segoe UI");
@@ -1295,14 +1316,21 @@ void draw_owner_button(const DRAWITEMSTRUCT* item) {
     if (item->CtlType == ODT_LISTBOX) {
         RECT r = item->rcItem;
         bool selected = (item->itemState & ODS_SELECTED) != 0;
-        HBRUSH bg = CreateSolidBrush(selected ? RGB(45, 119, 214) : RGB(20, 25, 33));
+        bool odd = (item->itemID != static_cast<UINT>(-1)) && (item->itemID % 2 == 1);
+        HBRUSH bg = CreateSolidBrush(selected ? RGB(0, 158, 205) : (odd ? RGB(15, 18, 24) : RGB(18, 21, 28)));
         FillRect(item->hDC, &r, bg);
         DeleteObject(bg);
+        if (selected) {
+            RECT accent{r.left, r.top, r.left + 4, r.bottom};
+            HBRUSH accent_brush = CreateSolidBrush(RGB(244, 244, 244));
+            FillRect(item->hDC, &accent, accent_brush);
+            DeleteObject(accent_brush);
+        }
         if (item->itemID != static_cast<UINT>(-1)) {
             wchar_t text[512] = {};
             SendMessageW(item->hwndItem, LB_GETTEXT, item->itemID, reinterpret_cast<LPARAM>(text));
             SetBkMode(item->hDC, TRANSPARENT);
-            SetTextColor(item->hDC, selected ? RGB(255, 255, 255) : RGB(226, 232, 240));
+            SetTextColor(item->hDC, selected ? RGB(255, 255, 255) : RGB(232, 236, 242));
             if (g_ui_font) {
                 SelectObject(item->hDC, g_ui_font);
             }
@@ -1318,7 +1346,7 @@ void draw_owner_button(const DRAWITEMSTRUCT* item) {
                 int thumb_h = std::max(1, static_cast<int>(thumb.bottom - thumb.top - 4));
                 Rect dest(thumb.left + 2, thumb.top + 2, thumb_w, thumb_h);
                 thumb_g.DrawImage(g_app.image.get(), dest, part.x, part.y, part.w, part.h, Gdiplus::UnitPixel);
-                HPEN thumb_border = CreatePen(PS_SOLID, 1, RGB(75, 86, 104));
+                HPEN thumb_border = CreatePen(PS_SOLID, 1, selected ? RGB(255, 255, 255) : RGB(80, 92, 110));
                 HGDIOBJ old_pen = SelectObject(item->hDC, thumb_border);
                 HGDIOBJ old_brush = SelectObject(item->hDC, GetStockObject(NULL_BRUSH));
                 Rectangle(item->hDC, thumb.left, thumb.top, thumb.right, thumb.bottom);
@@ -1331,6 +1359,12 @@ void draw_owner_button(const DRAWITEMSTRUCT* item) {
             }
             DrawTextW(item->hDC, text, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
+        HPEN separator = CreatePen(PS_SOLID, 1, RGB(30, 34, 43));
+        HGDIOBJ old_pen = SelectObject(item->hDC, separator);
+        MoveToEx(item->hDC, item->rcItem.left, item->rcItem.bottom - 1, nullptr);
+        LineTo(item->hDC, item->rcItem.right, item->rcItem.bottom - 1);
+        SelectObject(item->hDC, old_pen);
+        DeleteObject(separator);
         return;
     }
 
@@ -1339,8 +1373,8 @@ void draw_owner_button(const DRAWITEMSTRUCT* item) {
     bool checked = is_checked_button(static_cast<int>(item->CtlID));
     bool disabled = (item->itemState & ODS_DISABLED) != 0;
 
-    COLORREF bg = checked ? RGB(36, 112, 220) : (pressed ? RGB(55, 65, 82) : RGB(28, 34, 45));
-    COLORREF border = checked ? RGB(111, 226, 255) : (pressed ? RGB(130, 148, 170) : RGB(75, 86, 104));
+    COLORREF bg = checked ? RGB(0, 158, 205) : (pressed ? RGB(56, 62, 72) : RGB(20, 24, 32));
+    COLORREF border = checked ? RGB(125, 216, 209) : (pressed ? RGB(154, 164, 180) : RGB(82, 92, 108));
     COLORREF text = disabled ? RGB(120, 128, 140) : RGB(235, 241, 248);
 
     HBRUSH bg_brush = CreateSolidBrush(bg);
@@ -1348,6 +1382,25 @@ void draw_owner_button(const DRAWITEMSTRUCT* item) {
     HGDIOBJ old_brush = SelectObject(item->hDC, bg_brush);
     HGDIOBJ old_pen = SelectObject(item->hDC, border_pen);
     RoundRect(item->hDC, r.left, r.top, r.right, r.bottom, 7, 7);
+    if (checked) {
+        RECT glow{r.left + 2, r.top + 2, r.right - 2, r.top + 5};
+        HBRUSH glow_brush = CreateSolidBrush(RGB(122, 226, 255));
+        FillRect(item->hDC, &glow, glow_brush);
+        DeleteObject(glow_brush);
+        RECT active_bar{r.left + 2, r.top + 7, r.left + 5, r.bottom - 7};
+        HBRUSH active_brush = CreateSolidBrush(RGB(244, 244, 244));
+        FillRect(item->hDC, &active_bar, active_brush);
+        DeleteObject(active_brush);
+    } else if (pressed) {
+        RECT press_shadow{r.left + 1, r.top + 1, r.right - 1, r.bottom - 1};
+        HPEN press_pen = CreatePen(PS_SOLID, 1, RGB(25, 28, 34));
+        HGDIOBJ press_old_pen = SelectObject(item->hDC, press_pen);
+        HGDIOBJ press_old_brush = SelectObject(item->hDC, GetStockObject(NULL_BRUSH));
+        RoundRect(item->hDC, press_shadow.left, press_shadow.top, press_shadow.right, press_shadow.bottom, 6, 6);
+        SelectObject(item->hDC, press_old_brush);
+        SelectObject(item->hDC, press_old_pen);
+        DeleteObject(press_pen);
+    }
     SelectObject(item->hDC, old_pen);
     SelectObject(item->hDC, old_brush);
     DeleteObject(border_pen);
@@ -1384,22 +1437,42 @@ void draw_owner_button(const DRAWITEMSTRUCT* item) {
 
     wchar_t label[128] = {};
     GetWindowTextW(item->hwndItem, label, 128);
+    if (checked) {
+        r.left += 5;
+    }
     DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
 void draw_tool_preview(const DRAWITEMSTRUCT* item) {
     RECT r = item->rcItem;
-    HBRUSH bg = CreateSolidBrush(RGB(20, 25, 33));
+    HBRUSH bg = CreateSolidBrush(RGB(13, 16, 22));
     FillRect(item->hDC, &r, bg);
     DeleteObject(bg);
 
-    HPEN border = CreatePen(PS_SOLID, 1, RGB(75, 86, 104));
+    HPEN border = CreatePen(PS_SOLID, 1, RGB(82, 92, 108));
     HGDIOBJ old_pen = SelectObject(item->hDC, border);
     HBRUSH old_brush = reinterpret_cast<HBRUSH>(SelectObject(item->hDC, GetStockObject(NULL_BRUSH)));
     RoundRect(item->hDC, r.left, r.top, r.right, r.bottom, 8, 8);
     SelectObject(item->hDC, old_brush);
     SelectObject(item->hDC, old_pen);
     DeleteObject(border);
+
+    RECT preview_grid{r.left + 12, r.top + 52, r.right - 12, r.bottom - 10};
+    HBRUSH grid_bg = CreateSolidBrush(RGB(18, 22, 30));
+    FillRect(item->hDC, &preview_grid, grid_bg);
+    DeleteObject(grid_bg);
+    HPEN grid_pen = CreatePen(PS_SOLID, 1, RGB(32, 38, 48));
+    HGDIOBJ grid_old_pen = SelectObject(item->hDC, grid_pen);
+    for (int gx = preview_grid.left; gx < preview_grid.right; gx += 12) {
+        MoveToEx(item->hDC, gx, preview_grid.top, nullptr);
+        LineTo(item->hDC, gx, preview_grid.bottom);
+    }
+    for (int gy = preview_grid.top; gy < preview_grid.bottom; gy += 12) {
+        MoveToEx(item->hDC, preview_grid.left, gy, nullptr);
+        LineTo(item->hDC, preview_grid.right, gy);
+    }
+    SelectObject(item->hDC, grid_old_pen);
+    DeleteObject(grid_pen);
 
     SetBkMode(item->hDC, TRANSPARENT);
     SetTextColor(item->hDC, RGB(235, 241, 248));
@@ -1413,8 +1486,28 @@ void draw_tool_preview(const DRAWITEMSTRUCT* item) {
     std::wstring text = std::wstring(L"Ativo: ") + tool_name(g_app.tool);
     DrawTextW(item->hDC, text.c_str(), -1, &title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    int cx = r.left + 42;
-    int cy = r.top + 58;
+    RECT meta = r;
+    meta.left += 12;
+    meta.top += 30;
+    meta.bottom = meta.top + 18;
+    SetTextColor(item->hDC, RGB(166, 166, 170));
+    std::wstring brush_meta = L"Brush " + std::to_wstring(g_app.brush_size) + L"px";
+    DrawTextW(item->hDC, brush_meta.c_str(), -1, &meta, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT color_swatch{r.right - 40, r.top + 12, r.right - 16, r.top + 36};
+    HBRUSH swatch = CreateSolidBrush(g_app.tool == Tool::Eraser ? RGB(30, 34, 43) : g_app.brush_color);
+    FillRect(item->hDC, &color_swatch, swatch);
+    DeleteObject(swatch);
+    HPEN swatch_pen = CreatePen(PS_SOLID, 1, RGB(125, 216, 209));
+    HGDIOBJ swatch_old_pen = SelectObject(item->hDC, swatch_pen);
+    HGDIOBJ swatch_old_brush = SelectObject(item->hDC, GetStockObject(NULL_BRUSH));
+    Rectangle(item->hDC, color_swatch.left, color_swatch.top, color_swatch.right, color_swatch.bottom);
+    SelectObject(item->hDC, swatch_old_brush);
+    SelectObject(item->hDC, swatch_old_pen);
+    DeleteObject(swatch_pen);
+
+    int cx = r.left + 46;
+    int cy = r.top + 84;
     int radius = clamp_int(g_app.brush_size, 1, 128);
     int preview_radius = clamp_int(radius, 4, 28);
     HPEN cyan = CreatePen(PS_SOLID, 2, RGB(91, 220, 255));
@@ -1441,8 +1534,8 @@ void draw_tool_preview(const DRAWITEMSTRUCT* item) {
     DeleteObject(cyan);
 
     RECT hint = r;
-    hint.left += 82;
-    hint.top += 42;
+    hint.left += 88;
+    hint.top += 62;
     hint.right -= 10;
     hint.bottom -= 8;
     SetTextColor(item->hDC, RGB(177, 186, 201));
@@ -1558,7 +1651,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_zoom_fit = make_button(hwnd, L"Fit", BS_PUSHBUTTON, ID_ZOOM_FIT);
         g_options = make_button(hwnd, L"Opcoes", BS_PUSHBUTTON, ID_OPTIONS);
         g_dev_check = make_button(hwnd, L"Modo-dev", BS_AUTOCHECKBOX, ID_DEV);
-        SendMessageW(g_dev_check, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(g_dev_check, BM_SETCHECK, BST_UNCHECKED, 0);
         g_show_all = make_button(hwnd, L"Mostrar todas partes", BS_AUTOCHECKBOX, ID_SHOW_ALL);
         g_templates = make_child(hwnd, L"LISTBOX", L"", LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_BORDER | WS_VSCROLL, ID_TEMPLATES);
         g_parts = make_child(hwnd, L"LISTBOX", L"", LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_BORDER | WS_VSCROLL, ID_PARTS);
@@ -1800,7 +1893,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             g_app.show_all_parts = !g_app.show_all_parts;
             SendMessageW(g_show_all, BM_SETCHECK, g_app.show_all_parts ? BST_CHECKED : BST_UNCHECKED, 0);
             set_status(g_app.show_all_parts ? L"Mostrando todas as parts." : L"Mostrando somente a part focada.");
-            InvalidateRect(hwnd, nullptr, FALSE);
+            RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
             return 0;
         case ID_APPLY:
             apply_dev_fields();
