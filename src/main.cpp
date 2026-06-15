@@ -11,6 +11,8 @@
 #include <gdiplus.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -22,11 +24,18 @@
 namespace fs = std::filesystem;
 using Gdiplus::Bitmap;
 using Gdiplus::Color;
+using Gdiplus::CompositingModeSourceCopy;
 using Gdiplus::Graphics;
 using Gdiplus::Image;
 using Gdiplus::Pen;
 using Gdiplus::Rect;
 using Gdiplus::SolidBrush;
+
+enum class Tool {
+    Select,
+    Pencil,
+    Eraser
+};
 
 struct Part {
     std::string id;
@@ -56,8 +65,18 @@ struct AppState {
     int selected_part = 0;
     bool dev_mode = true;
     bool show_all_parts = false;
-    std::unique_ptr<Image> image;
+    bool fit_to_view = true;
+    bool drawing = false;
+    bool panning = false;
+    Tool tool = Tool::Select;
+    int brush_size = 8;
+    double zoom = 1.0;
+    int pan_x = 0;
+    int pan_y = 0;
+    POINT last_mouse{};
+    std::unique_ptr<Bitmap> image;
     Rect image_rect;
+    Rect preview_rect;
     ULONG_PTR gdiplus_token = 0;
 };
 
@@ -78,9 +97,19 @@ HWND g_new_part = nullptr;
 HWND g_delete_part = nullptr;
 HWND g_save = nullptr;
 HWND g_open = nullptr;
+HWND g_save_png = nullptr;
 HWND g_reset = nullptr;
 HWND g_show_all = nullptr;
+HWND g_select_tool = nullptr;
+HWND g_pencil_tool = nullptr;
+HWND g_eraser_tool = nullptr;
+HWND g_zoom_out = nullptr;
+HWND g_zoom_label = nullptr;
+HWND g_zoom_in = nullptr;
+HWND g_zoom_fit = nullptr;
+HWND g_brush_size = nullptr;
 HFONT g_ui_font = nullptr;
+WNDPROC g_edit_proc = nullptr;
 
 constexpr int ID_TEMPLATES = 1001;
 constexpr int ID_PARTS = 1002;
@@ -92,6 +121,13 @@ constexpr int ID_NEW = 1007;
 constexpr int ID_DELETE = 1008;
 constexpr int ID_SAVE = 1009;
 constexpr int ID_SHOW_ALL = 1010;
+constexpr int ID_SAVE_PNG = 1011;
+constexpr int ID_TOOL_SELECT = 1012;
+constexpr int ID_TOOL_PENCIL = 1013;
+constexpr int ID_TOOL_ERASER = 1014;
+constexpr int ID_ZOOM_OUT = 1015;
+constexpr int ID_ZOOM_IN = 1016;
+constexpr int ID_ZOOM_FIT = 1017;
 
 std::wstring widen(const std::string& text) {
     if (text.empty()) {
@@ -128,12 +164,82 @@ void set_control_int(HWND hwnd, int value) {
     SetWindowTextW(hwnd, std::to_wstring(value).c_str());
 }
 
+void delete_previous_word(HWND hwnd) {
+    DWORD start = 0;
+    DWORD end = 0;
+    SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+    if (start != end) {
+        SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+        return;
+    }
+
+    int len = GetWindowTextLengthW(hwnd);
+    std::wstring text(len, L'\0');
+    GetWindowTextW(hwnd, text.data(), len + 1);
+    int pos = static_cast<int>(start);
+    while (pos > 0 && iswspace(text[pos - 1])) {
+        --pos;
+    }
+    while (pos > 0 && !iswspace(text[pos - 1])) {
+        --pos;
+    }
+    SendMessageW(hwnd, EM_SETSEL, pos, start);
+    SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+}
+
+LRESULT CALLBACK edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (wparam == 'A') {
+            SendMessageW(hwnd, EM_SETSEL, 0, -1);
+            return 0;
+        }
+        if (wparam == VK_BACK) {
+            delete_previous_word(hwnd);
+            return 0;
+        }
+    }
+    return CallWindowProcW(g_edit_proc, hwnd, message, wparam, lparam);
+}
+
 int get_control_int(HWND hwnd, int fallback) {
     try {
         return std::stoi(read_control(hwnd));
     } catch (...) {
         return fallback;
     }
+}
+
+int clamp_int(int value, int min_value, int max_value) {
+    return std::max(min_value, std::min(max_value, value));
+}
+
+RECT to_win_rect(const Rect& rect) {
+    return RECT{rect.X, rect.Y, rect.X + rect.Width, rect.Y + rect.Height};
+}
+
+RECT inflated_win_rect(const Rect& rect, int inflate) {
+    RECT out = to_win_rect(rect);
+    InflateRect(&out, inflate, inflate);
+    return out;
+}
+
+int get_encoder_clsid(const WCHAR* format, CLSID* clsid) {
+    UINT count = 0;
+    UINT size = 0;
+    Gdiplus::GetImageEncodersSize(&count, &size);
+    if (size == 0) {
+        return -1;
+    }
+    std::vector<unsigned char> buffer(size);
+    auto* info = reinterpret_cast<Gdiplus::ImageCodecInfo*>(buffer.data());
+    Gdiplus::GetImageEncoders(count, size, info);
+    for (UINT i = 0; i < count; ++i) {
+        if (wcscmp(info[i].MimeType, format) == 0) {
+            *clsid = info[i].Clsid;
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
 }
 
 std::string read_file(const fs::path& path) {
@@ -351,15 +457,55 @@ void set_status(const std::wstring& message) {
 
 void load_image(const fs::path& path) {
     g_app.current_image_path = path;
-    g_app.image.reset(Image::FromFile(path.wstring().c_str()));
-    if (!g_app.image || g_app.image->GetLastStatus() != Gdiplus::Ok) {
+    std::unique_ptr<Bitmap> loaded(Bitmap::FromFile(path.wstring().c_str()));
+    if (!loaded || loaded->GetLastStatus() != Gdiplus::Ok) {
         g_app.image.reset();
         set_status(L"Falha ao carregar imagem.");
         return;
     }
+    Rect full(0, 0, static_cast<int>(loaded->GetWidth()), static_cast<int>(loaded->GetHeight()));
+    g_app.image.reset(loaded->Clone(full, PixelFormat32bppARGB));
+    if (!g_app.image || g_app.image->GetLastStatus() != Gdiplus::Ok) {
+        g_app.image.reset();
+        set_status(L"Falha ao preparar imagem para edicao.");
+        return;
+    }
+    g_app.fit_to_view = true;
+    g_app.zoom = 1.0;
+    g_app.pan_x = 0;
+    g_app.pan_y = 0;
     std::wstring size = std::to_wstring(g_app.image->GetWidth()) + L"x" + std::to_wstring(g_app.image->GetHeight());
     set_status(L"Imagem carregada: " + path.filename().wstring() + L" (" + size + L")");
     InvalidateRect(g_main, nullptr, FALSE);
+}
+
+void save_image_as(HWND owner) {
+    if (!g_app.image) {
+        return;
+    }
+    wchar_t file_name[MAX_PATH] = {};
+    wcscpy_s(file_name, L"texture-edited.png");
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"PNG files (*.png)\0*.png\0";
+    ofn.lpstrFile = file_name;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    ofn.lpstrDefExt = L"png";
+    if (!GetSaveFileNameW(&ofn)) {
+        return;
+    }
+    CLSID png_clsid{};
+    if (get_encoder_clsid(L"image/png", &png_clsid) < 0) {
+        set_status(L"Encoder PNG nao encontrado.");
+        return;
+    }
+    if (g_app.image->Save(file_name, &png_clsid, nullptr) == Gdiplus::Ok) {
+        set_status(L"PNG salvo: " + fs::path(file_name).filename().wstring());
+    } else {
+        set_status(L"Falha ao salvar PNG.");
+    }
 }
 
 void load_default_image() {
@@ -496,8 +642,16 @@ void layout(HWND hwnd) {
     int gap = 10;
 
     MoveWindow(g_open, 12, 12, 110, 30, TRUE);
-    MoveWindow(g_reset, 130, 12, 120, 30, TRUE);
-    MoveWindow(g_show_all, 270, 16, 160, 24, TRUE);
+    MoveWindow(g_save_png, 130, 12, 110, 30, TRUE);
+    MoveWindow(g_reset, 248, 12, 125, 30, TRUE);
+    MoveWindow(g_select_tool, 390, 12, 90, 30, TRUE);
+    MoveWindow(g_pencil_tool, 488, 12, 80, 30, TRUE);
+    MoveWindow(g_eraser_tool, 576, 12, 90, 30, TRUE);
+    MoveWindow(g_zoom_out, 690, 12, 34, 30, TRUE);
+    MoveWindow(g_zoom_label, 730, 16, 58, 24, TRUE);
+    MoveWindow(g_zoom_in, 794, 12, 34, 30, TRUE);
+    MoveWindow(g_zoom_fit, 834, 12, 48, 30, TRUE);
+    MoveWindow(g_show_all, 900, 16, 160, 24, TRUE);
     MoveWindow(g_dev_check, width - 150, 16, 135, 24, TRUE);
     MoveWindow(g_templates, 12, top, left - 24, 170, TRUE);
     MoveWindow(g_parts, 12, top + 185, left - 24, height - top - 198 - status_h, TRUE);
@@ -511,7 +665,7 @@ void layout(HWND hwnd) {
         y += 34;
     };
 
-    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_apply, g_new_part, g_delete_part, g_save};
+    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_brush_size, g_apply, g_new_part, g_delete_part, g_save};
     for (HWND child : children) {
         ShowWindow(child, g_app.dev_mode ? SW_SHOW : SW_HIDE);
     }
@@ -524,15 +678,18 @@ void layout(HWND hwnd) {
         labels[3] = GetDlgItem(hwnd, 2004);
         labels[4] = GetDlgItem(hwnd, 2005);
         labels[5] = GetDlgItem(hwnd, 2006);
+        HWND brush_label = GetDlgItem(hwnd, 2007);
         for (HWND label : labels) {
             ShowWindow(label, SW_SHOW);
         }
+        ShowWindow(brush_label, SW_SHOW);
         place(labels[0], g_id);
         place(labels[1], g_label);
         place(labels[2], g_x);
         place(labels[3], g_y);
         place(labels[4], g_w);
         place(labels[5], g_h);
+        place(brush_label, g_brush_size);
         MoveWindow(g_apply, right_x, y + gap, dev - 24, 30, TRUE);
         MoveWindow(g_new_part, right_x, y + 46, dev - 24, 30, TRUE);
         MoveWindow(g_delete_part, right_x, y + 82, dev - 24, 30, TRUE);
@@ -541,6 +698,7 @@ void layout(HWND hwnd) {
         for (int id = 2001; id <= 2006; ++id) {
             ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
         }
+        ShowWindow(GetDlgItem(hwnd, 2007), SW_HIDE);
     }
     InvalidateRect(hwnd, nullptr, TRUE);
 }
@@ -560,10 +718,26 @@ Rect fit_image_rect(const Rect& bounds, Image* image) {
     }
     double iw = static_cast<double>(image->GetWidth());
     double ih = static_cast<double>(image->GetHeight());
-    double scale = std::min(1.0, std::min(bounds.Width / iw, bounds.Height / ih));
+    double scale = g_app.fit_to_view ? std::min(1.0, std::min(bounds.Width / iw, bounds.Height / ih)) : g_app.zoom;
     int w = static_cast<int>(iw * scale);
     int h = static_cast<int>(ih * scale);
-    return Rect(bounds.X + (bounds.Width - w) / 2, bounds.Y + (bounds.Height - h) / 2, w, h);
+    return Rect(bounds.X + (bounds.Width - w) / 2 + g_app.pan_x, bounds.Y + (bounds.Height - h) / 2 + g_app.pan_y, w, h);
+}
+
+POINT screen_to_image_point(int x, int y) {
+    POINT point{-1, -1};
+    if (!g_app.image || g_app.image_rect.Width <= 0 || g_app.image_rect.Height <= 0) {
+        return point;
+    }
+    double sx = static_cast<double>(g_app.image->GetWidth()) / g_app.image_rect.Width;
+    double sy = static_cast<double>(g_app.image->GetHeight()) / g_app.image_rect.Height;
+    point.x = static_cast<LONG>((x - g_app.image_rect.X) * sx);
+    point.y = static_cast<LONG>((y - g_app.image_rect.Y) * sy);
+    return point;
+}
+
+bool image_point_inside(const POINT& point) {
+    return g_app.image && point.x >= 0 && point.y >= 0 && point.x < static_cast<LONG>(g_app.image->GetWidth()) && point.y < static_cast<LONG>(g_app.image->GetHeight());
 }
 
 Rect part_to_screen(const Part& part) {
@@ -578,6 +752,74 @@ Rect part_to_screen(const Part& part) {
         g_app.image_rect.Y + static_cast<int>(part.y * sy),
         std::max(1, static_cast<int>(part.w * sx)),
         std::max(1, static_cast<int>(part.h * sy)));
+}
+
+Rect image_rect_to_screen_rect(int x, int y, int w, int h) {
+    if (!g_app.image || g_app.image_rect.Width <= 0 || g_app.image_rect.Height <= 0) {
+        return canvas_rect(g_main);
+    }
+    double sx = static_cast<double>(g_app.image_rect.Width) / g_app.image->GetWidth();
+    double sy = static_cast<double>(g_app.image_rect.Height) / g_app.image->GetHeight();
+    int left = g_app.image_rect.X + static_cast<int>(std::floor(x * sx));
+    int top = g_app.image_rect.Y + static_cast<int>(std::floor(y * sy));
+    int right = g_app.image_rect.X + static_cast<int>(std::ceil((x + w) * sx));
+    int bottom = g_app.image_rect.Y + static_cast<int>(std::ceil((y + h) * sy));
+    return Rect(left, top, std::max(1, right - left), std::max(1, bottom - top));
+}
+
+void set_tool(Tool tool) {
+    g_app.tool = tool;
+    SendMessageW(g_select_tool, BM_SETCHECK, tool == Tool::Select ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_pencil_tool, BM_SETCHECK, tool == Tool::Pencil ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_eraser_tool, BM_SETCHECK, tool == Tool::Eraser ? BST_CHECKED : BST_UNCHECKED, 0);
+    const wchar_t* name = tool == Tool::Select ? L"Selecionar" : (tool == Tool::Pencil ? L"Lapis" : L"Borracha");
+    set_status(std::wstring(L"Ferramenta: ") + name);
+}
+
+void update_zoom_label() {
+    if (!g_zoom_label) {
+        return;
+    }
+    std::wstring label = g_app.fit_to_view ? L"Fit" : std::to_wstring(static_cast<int>(g_app.zoom * 100.0)) + L"%";
+    SetWindowTextW(g_zoom_label, label.c_str());
+}
+
+void set_zoom(double zoom) {
+    g_app.fit_to_view = false;
+    g_app.zoom = std::max(0.25, std::min(16.0, zoom));
+    update_zoom_label();
+    InvalidateRect(g_main, nullptr, FALSE);
+}
+
+void fit_zoom() {
+    g_app.fit_to_view = true;
+    g_app.pan_x = 0;
+    g_app.pan_y = 0;
+    update_zoom_label();
+    InvalidateRect(g_main, nullptr, FALSE);
+}
+
+void paint_at(int screen_x, int screen_y) {
+    POINT p = screen_to_image_point(screen_x, screen_y);
+    if (!image_point_inside(p)) {
+        return;
+    }
+    g_app.brush_size = clamp_int(get_control_int(g_brush_size, g_app.brush_size), 1, 128);
+    Graphics image_g(g_app.image.get());
+    image_g.SetSmoothingMode(Gdiplus::SmoothingModeNone);
+    image_g.SetCompositingMode(g_app.tool == Tool::Eraser ? CompositingModeSourceCopy : Gdiplus::CompositingModeSourceOver);
+    Color color = g_app.tool == Tool::Eraser ? Color(0, 0, 0, 0) : Color(255, 255, 255, 255);
+    SolidBrush brush(color);
+    int radius = std::max(1, g_app.brush_size);
+    image_g.FillRectangle(&brush, p.x - radius / 2, p.y - radius / 2, radius, radius);
+
+    Rect dirty = image_rect_to_screen_rect(p.x - radius, p.y - radius, radius * 2, radius * 2);
+    RECT dirty_win = inflated_win_rect(dirty, 4);
+    InvalidateRect(g_main, &dirty_win, FALSE);
+    if (g_app.preview_rect.Width > 0 && g_app.preview_rect.Height > 0) {
+        RECT preview = inflated_win_rect(g_app.preview_rect, 4);
+        InvalidateRect(g_main, &preview, FALSE);
+    }
 }
 
 void paint(HWND hwnd) {
@@ -606,9 +848,15 @@ void paint(HWND hwnd) {
 
     SolidBrush checker_a(Color(255, 26, 30, 38));
     SolidBrush checker_b(Color(255, 33, 38, 48));
+    RECT repaint = ps.rcPaint;
+    RECT canvas_win = to_win_rect(canvas);
+    RECT checker_clip{};
+    IntersectRect(&checker_clip, &repaint, &canvas_win);
     constexpr int checker = 16;
-    for (int y = canvas.Y; y < canvas.Y + canvas.Height; y += checker) {
-        for (int x = canvas.X; x < canvas.X + canvas.Width; x += checker) {
+    int start_y = canvas.Y + ((checker_clip.top - canvas.Y) / checker) * checker;
+    int start_x = canvas.X + ((checker_clip.left - canvas.X) / checker) * checker;
+    for (int y = start_y; y < checker_clip.bottom; y += checker) {
+        for (int x = start_x; x < checker_clip.right; x += checker) {
             bool alt = ((x / checker) + (y / checker)) % 2 == 0;
             g.FillRectangle(alt ? &checker_a : &checker_b, x, y, checker, checker);
         }
@@ -647,12 +895,17 @@ void paint(HWND hwnd) {
             int preview_w = std::max(1, part->w * zoom);
             int preview_h = std::max(1, part->h * zoom);
             Rect preview(canvas.X + canvas.Width - preview_w - 18, canvas.Y + canvas.Height - preview_h - 18, preview_w, preview_h);
+            g_app.preview_rect = preview;
             SolidBrush preview_bg(Color(230, 20, 25, 33));
             g.FillRectangle(&preview_bg, preview);
             g.DrawRectangle(&cyan, preview);
             Rect src(part->x, part->y, part->w, part->h);
             g.DrawImage(g_app.image.get(), preview, src.X, src.Y, src.Width, src.Height, Gdiplus::UnitPixel);
+        } else {
+            g_app.preview_rect = Rect();
         }
+    } else {
+        g_app.preview_rect = Rect();
     }
 
     EndPaint(hwnd, &ps);
@@ -690,13 +943,28 @@ HWND make_child(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD styl
     return child;
 }
 
+void subclass_edit(HWND hwnd) {
+    if (!g_edit_proc) {
+        g_edit_proc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_WNDPROC));
+    }
+    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(edit_proc));
+}
+
 LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
-    case WM_CREATE:
+    case WM_CREATE: {
         g_main = hwnd;
         g_ui_font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
         g_open = make_child(hwnd, L"BUTTON", L"Abrir PNG", BS_PUSHBUTTON, ID_OPEN);
+        g_save_png = make_child(hwnd, L"BUTTON", L"Salvar PNG", BS_PUSHBUTTON, ID_SAVE_PNG);
         g_reset = make_child(hwnd, L"BUTTON", L"Template padrao", BS_PUSHBUTTON, ID_RESET);
+        g_select_tool = make_child(hwnd, L"BUTTON", L"Selecionar", BS_AUTORADIOBUTTON, ID_TOOL_SELECT);
+        g_pencil_tool = make_child(hwnd, L"BUTTON", L"Lapis", BS_AUTORADIOBUTTON, ID_TOOL_PENCIL);
+        g_eraser_tool = make_child(hwnd, L"BUTTON", L"Borracha", BS_AUTORADIOBUTTON, ID_TOOL_ERASER);
+        g_zoom_out = make_child(hwnd, L"BUTTON", L"-", BS_PUSHBUTTON, ID_ZOOM_OUT);
+        g_zoom_label = make_child(hwnd, L"STATIC", L"Fit", SS_CENTER, 0);
+        g_zoom_in = make_child(hwnd, L"BUTTON", L"+", BS_PUSHBUTTON, ID_ZOOM_IN);
+        g_zoom_fit = make_child(hwnd, L"BUTTON", L"Fit", BS_PUSHBUTTON, ID_ZOOM_FIT);
         g_dev_check = make_child(hwnd, L"BUTTON", L"Modo-dev", BS_AUTOCHECKBOX, ID_DEV);
         SendMessageW(g_dev_check, BM_SETCHECK, BST_CHECKED, 0);
         g_show_all = make_child(hwnd, L"BUTTON", L"Mostrar todas partes", BS_AUTOCHECKBOX, ID_SHOW_ALL);
@@ -710,26 +978,94 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         make_child(hwnd, L"STATIC", L"Y", SS_LEFT, 2004);
         make_child(hwnd, L"STATIC", L"W", SS_LEFT, 2005);
         make_child(hwnd, L"STATIC", L"H", SS_LEFT, 2006);
+        make_child(hwnd, L"STATIC", L"Pincel", SS_LEFT, 2007);
         g_id = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 0);
         g_label = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 0);
         g_x = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_NUMBER, 0);
         g_y = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_NUMBER, 0);
         g_w = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_NUMBER, 0);
         g_h = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_NUMBER, 0);
+        g_brush_size = make_child(hwnd, L"EDIT", L"8", WS_BORDER | ES_NUMBER, 0);
         g_apply = make_child(hwnd, L"BUTTON", L"Aplicar parte", BS_PUSHBUTTON, ID_APPLY);
         g_new_part = make_child(hwnd, L"BUTTON", L"Nova parte", BS_PUSHBUTTON, ID_NEW);
         g_delete_part = make_child(hwnd, L"BUTTON", L"Remover parte", BS_PUSHBUTTON, ID_DELETE);
         g_save = make_child(hwnd, L"BUTTON", L"Salvar JSON", BS_PUSHBUTTON, ID_SAVE);
+        HWND edits[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_brush_size};
+        for (HWND edit : edits) {
+            subclass_edit(edit);
+        }
+        set_tool(Tool::Select);
+        update_zoom_label();
 
         rebuild_templates();
         load_default_image();
         layout(hwnd);
         return 0;
+    }
     case WM_SIZE:
         layout(hwnd);
         return 0;
     case WM_LBUTTONDOWN:
-        select_part_from_point(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+        SetFocus(hwnd);
+        if (g_app.tool == Tool::Select) {
+            select_part_from_point(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+        } else {
+            g_app.drawing = true;
+            g_app.last_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            SetCapture(hwnd);
+            paint_at(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            UpdateWindow(hwnd);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        if (g_app.drawing) {
+            g_app.drawing = false;
+            ReleaseCapture();
+            set_status(L"Edicao aplicada na imagem. Use Salvar PNG para exportar.");
+        }
+        return 0;
+    case WM_RBUTTONDOWN:
+        g_app.panning = true;
+        g_app.last_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        SetCapture(hwnd);
+        return 0;
+    case WM_RBUTTONUP:
+        if (g_app.panning) {
+            g_app.panning = false;
+            ReleaseCapture();
+        }
+        return 0;
+    case WM_MOUSEMOVE:
+        if (g_app.drawing) {
+            int x = GET_X_LPARAM(lparam);
+            int y = GET_Y_LPARAM(lparam);
+            int dx = x - g_app.last_mouse.x;
+            int dy = y - g_app.last_mouse.y;
+            int steps = std::max(1, std::max(std::abs(dx), std::abs(dy)) / std::max(1, g_app.brush_size / 2));
+            for (int i = 1; i <= steps; ++i) {
+                int px = g_app.last_mouse.x + dx * i / steps;
+                int py = g_app.last_mouse.y + dy * i / steps;
+                paint_at(px, py);
+            }
+            g_app.last_mouse = {x, y};
+            UpdateWindow(hwnd);
+        } else if (g_app.panning) {
+            int x = GET_X_LPARAM(lparam);
+            int y = GET_Y_LPARAM(lparam);
+            g_app.pan_x += x - g_app.last_mouse.x;
+            g_app.pan_y += y - g_app.last_mouse.y;
+            g_app.last_mouse = {x, y};
+            g_app.fit_to_view = false;
+            update_zoom_label();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    case WM_MOUSEWHEEL:
+        if (GET_KEYSTATE_WPARAM(wparam) & MK_CONTROL) {
+            int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+            set_zoom((g_app.fit_to_view ? 1.0 : g_app.zoom) * (delta > 0 ? 1.25 : 0.8));
+            return 0;
+        }
         return 0;
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
@@ -751,8 +1087,29 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         case ID_OPEN:
             choose_image(hwnd);
             return 0;
+        case ID_SAVE_PNG:
+            save_image_as(hwnd);
+            return 0;
         case ID_RESET:
             load_default_image();
+            return 0;
+        case ID_TOOL_SELECT:
+            set_tool(Tool::Select);
+            return 0;
+        case ID_TOOL_PENCIL:
+            set_tool(Tool::Pencil);
+            return 0;
+        case ID_TOOL_ERASER:
+            set_tool(Tool::Eraser);
+            return 0;
+        case ID_ZOOM_OUT:
+            set_zoom((g_app.fit_to_view ? 1.0 : g_app.zoom) / 2.0);
+            return 0;
+        case ID_ZOOM_IN:
+            set_zoom((g_app.fit_to_view ? 1.0 : g_app.zoom) * 2.0);
+            return 0;
+        case ID_ZOOM_FIT:
+            fit_zoom();
             return 0;
         case ID_DEV:
             g_app.dev_mode = SendMessageW(g_dev_check, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -816,7 +1173,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
         0,
         wc.lpszClassName,
         L"Teeworlds Texture Editor 0.1 - Lex copyright 2026",
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         1700,

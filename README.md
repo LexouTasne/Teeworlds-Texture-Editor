@@ -102,12 +102,24 @@ Ao abrir `build\tte.exe`:
 - escolha o template na lista da esquerda;
 - escolha uma parte, como `eye_normal`, `gun`, `health` ou `explosion`;
 - clique em `Abrir PNG` para carregar uma textura sua;
+- use `Selecionar`, `Lapis` ou `Borracha` na barra superior;
+- use `-`, `+` e `Fit` para controlar o zoom;
+- use `Ctrl + roda do mouse` para zoom rapido;
+- use botao direito e arraste para mover a textura quando estiver com zoom;
 - clique em `Template padrao` para voltar ao template interno;
 - use o `Modo-dev` na direita para ajustar IDs e coordenadas;
+- use `Pincel` para controlar o tamanho do lapis/borracha;
 - clique em `Aplicar parte` para atualizar a selecao;
 - clique em `Salvar JSON` para gravar em `data/templates/teeworlds_textures.json`.
+- clique em `Salvar PNG` para exportar a textura editada.
 
 O foco visual escurece o resto da textura e amplia a parte selecionada no painel de preview.
+
+Nos campos de texto do modo-dev:
+
+- `Ctrl + A` seleciona tudo;
+- `Ctrl + C`, `Ctrl + V` e `Ctrl + X` usam o comportamento nativo do Windows;
+- `Ctrl + Backspace` apaga a palavra anterior.
 
 Importante: o editor usa os PNGs reais que estiverem em `data/defaults/`. Ele nao redesenha essas texturas em runtime. Para usar as imagens oficiais/exatas, substitua os arquivos desta pasta mantendo os nomes:
 
