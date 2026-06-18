@@ -15,7 +15,7 @@ set(TTE_ICON_PATH "")
 if(EXISTS "${CMAKE_SOURCE_DIR}/app.ico")
     set(TTE_ICON_PATH "${CMAKE_SOURCE_DIR}/app.ico")
 else()
-    file(GLOB TTE_ICON_CANDIDATES CONFIGURE_DEPENDS
+    file(GLOB TTE_ICON_CANDIDATES
         "${CMAKE_SOURCE_DIR}/assets/icons/*.ico"
         "${CMAKE_SOURCE_DIR}/*.ico"
     )
@@ -97,6 +97,8 @@ add_custom_target(package-local
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/icons" "${TTE_PACKAGE_DIR}/icons"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${TTE_PACKAGE_DIR}/IA-TRAIN"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/IA-TRAIN/README.md" "${TTE_PACKAGE_DIR}/IA-TRAIN/README.md"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/IA-TRAIN/README_AI.md" "${TTE_PACKAGE_DIR}/IA-TRAIN/README_AI.md"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/IA-TRAIN/genus_ai_bridge.py" "${TTE_PACKAGE_DIR}/IA-TRAIN/genus_ai_bridge.py"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/scripts" "${TTE_PACKAGE_DIR}/scripts"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/requirements.txt" "${TTE_PACKAGE_DIR}/requirements.txt"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_SOURCE_DIR}/README.md" "${TTE_PACKAGE_DIR}/README.md"

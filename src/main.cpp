@@ -1,4 +1,4 @@
-#ifndef UNICODE
+﻿#ifndef UNICODE
 #define UNICODE
 #endif
 #ifndef _UNICODE
@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cctype>
 #include <cwctype>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -39,7 +40,8 @@ enum class Tool {
     Select,
     Pencil,
     Eraser,
-    Bucket
+    Bucket,
+    Crop
 };
 
 enum class BrushShape {
@@ -92,6 +94,14 @@ struct AppState {
     bool hover_canvas = false;
     bool tracking_mouse = false;
     bool tool_panel_open = false;
+    bool ai_teach_mode = false;
+    bool moving_layer = false;
+    std::string last_ai_prompt;
+    std::unique_ptr<Bitmap> floating_layer;
+    Rect floating_layer_source;
+    POINT floating_layer_offset{};
+    POINT layer_drag_start{};
+    POINT layer_offset_start{};
     int active_slider = 0;
     double part_scale_x = 1.0;
     double part_scale_y = 1.0;
@@ -138,6 +148,7 @@ HWND g_select_tool = nullptr;
 HWND g_pencil_tool = nullptr;
 HWND g_eraser_tool = nullptr;
 HWND g_bucket_tool = nullptr;
+HWND g_crop_tool = nullptr;
 HWND g_color_pick = nullptr;
 HWND g_zoom_out = nullptr;
 HWND g_zoom_label = nullptr;
@@ -200,6 +211,7 @@ constexpr int ID_OPTIONS_COLOR = 1027;
 constexpr int ID_PART_UP = 1028;
 constexpr int ID_PART_DOWN = 1029;
 constexpr int ID_TOOL_BUCKET = 1030;
+constexpr int ID_TOOL_CROP = 1039;
 constexpr int ID_OPACITY = 1031;
 constexpr int ID_TOLERANCE = 1032;
 constexpr int ID_SIZE_MINUS = 1033;
@@ -215,7 +227,7 @@ constexpr int ID_AI_STEPS = 2102;
 constexpr int ID_AI_RUN = 2103;
 
 constexpr size_t MAX_HISTORY = 400;
-constexpr UINT ACTIVE_FRAME_MS = 8;
+constexpr UINT ACTIVE_FRAME_MS = 16;
 constexpr UINT MINIMIZED_FRAME_MS = 33;
 
 constexpr int UI_MENU_H = 34;
@@ -235,6 +247,7 @@ void populate_dev_fields();
 void close_tool_panel();
 void set_status(const std::wstring& message);
 void layout_tool_panel_controls(HWND hwnd);
+void layout(HWND hwnd);
 void sync_options_controls();
 void bucket_fill_at(int screen_x, int screen_y);
 Rect image_rect_to_screen_rect(int x, int y, int w, int h);
@@ -242,6 +255,9 @@ Rect editable_source_rect();
 void set_tool(Tool tool);
 void rebuild_parts();
 void load_default_image(bool force);
+void crop_selected_part_to_layer();
+void merge_floating_layer();
+void begin_ai_teach_mode(const std::string& prompt);
 
 std::wstring widen(const std::string& text) {
     if (text.empty()) {
@@ -425,6 +441,8 @@ const wchar_t* tool_name(Tool tool) {
         return L"Borracha";
     case Tool::Bucket:
         return L"Balde";
+    case Tool::Crop:
+        return L"Recorte";
     }
     return L"Ferramenta";
 }
@@ -629,8 +647,25 @@ std::string lower_ascii(std::string value) {
     return value;
 }
 
+void replace_all(std::string& value, const std::string& from, const std::string& to) {
+    if (from.empty()) {
+        return;
+    }
+    size_t pos = 0;
+    while ((pos = value.find(from, pos)) != std::string::npos) {
+        value.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+
 std::string normalize_text(std::string value) {
     value = lower_ascii(value);
+    replace_all(value, "Ã¡", "a"); replace_all(value, "Ã ", "a"); replace_all(value, "Ã£", "a"); replace_all(value, "Ã¢", "a"); replace_all(value, "Ã¤", "a");
+    replace_all(value, "Ã©", "e"); replace_all(value, "Ã¨", "e"); replace_all(value, "Ãª", "e"); replace_all(value, "Ã«", "e");
+    replace_all(value, "Ã­", "i"); replace_all(value, "Ã¬", "i"); replace_all(value, "Ã®", "i"); replace_all(value, "Ã¯", "i");
+    replace_all(value, "Ã³", "o"); replace_all(value, "Ã²", "o"); replace_all(value, "Ãµ", "o"); replace_all(value, "Ã´", "o"); replace_all(value, "Ã¶", "o");
+    replace_all(value, "Ãº", "u"); replace_all(value, "Ã¹", "u"); replace_all(value, "Ã»", "u"); replace_all(value, "Ã¼", "u");
+    replace_all(value, "Ã§", "c");
     for (char& c : value) {
         if (!std::isalnum(static_cast<unsigned char>(c)) && c != '#') {
             c = ' ';
@@ -732,6 +767,8 @@ bool icon_cell_for_button(int id, int& col, int& row) {
         col = 2; row = 0; return true;
     case ID_TOOL_SELECT:
         col = 2; row = 1; return true;
+    case ID_TOOL_CROP:
+        col = 3; row = 0; return true;
     case ID_ZOOM_IN:
     case ID_ZOOM_OUT:
         col = 3; row = 1; return true;
@@ -871,6 +908,8 @@ void load_image(const fs::path& path, bool force = false) {
     g_app.zoom = 1.0;
     g_app.pan_x = 0;
     g_app.pan_y = 0;
+    g_app.floating_layer.reset();
+    g_app.moving_layer = false;
     if (TextureTemplate* texture = current_template(); texture && texture->width > 0 && texture->height > 0) {
         g_app.part_scale_x = static_cast<double>(g_app.image->GetWidth()) / texture->width;
         g_app.part_scale_y = static_cast<double>(g_app.image->GetHeight()) / texture->height;
@@ -888,6 +927,7 @@ void save_image_as(HWND owner) {
     if (!g_app.image) {
         return;
     }
+    merge_floating_layer();
     wchar_t file_name[MAX_PATH] = {};
     wcscpy_s(file_name, L"texture-edited.png");
     OPENFILENAMEW ofn = {};
@@ -1055,6 +1095,44 @@ COLORREF parse_hex_color(const std::string& text, COLORREF fallback) {
     return RGB(r, g, b);
 }
 
+COLORREF parse_any_color(const std::string& text, COLORREF fallback) {
+    COLORREF hex = parse_hex_color(text, fallback);
+    if (hex != fallback || text.find('#') != std::string::npos) {
+        return hex;
+    }
+    std::string norm = normalize_text(text);
+    struct NamedColor { const char* names; COLORREF color; };
+    const NamedColor colors[] = {
+        {" blue azul ", RGB(38, 126, 255)},
+        {" yellow amarelo amarela ", RGB(255, 210, 0)},
+        {" red vermelho vermelha ", RGB(232, 52, 72)},
+        {" green verde ", RGB(40, 190, 110)},
+        {" black preto preta ", RGB(0, 0, 0)},
+        {" white branco branca ", RGB(255, 255, 255)},
+        {" orange laranja ", RGB(255, 142, 34)},
+        {" purple roxo roxa ", RGB(160, 88, 255)},
+        {" pink rosa ", RGB(255, 92, 172)},
+        {" gray grey cinza ", RGB(128, 128, 128)},
+        {" cyan ciano ", RGB(0, 210, 255)}
+    };
+    for (const NamedColor& named : colors) {
+        std::istringstream names(named.names);
+        std::string name;
+        while (names >> name) {
+            if (norm.find(name) != std::string::npos) {
+                return named.color;
+            }
+        }
+    }
+    return fallback;
+}
+
+std::string color_to_hex(COLORREF color) {
+    char buffer[16] = {};
+    std::snprintf(buffer, sizeof(buffer), "#%02X%02X%02X", GetRValue(color), GetGValue(color), GetBValue(color));
+    return buffer;
+}
+
 int number_after_any(const std::string& text, const std::vector<std::string>& keys, int fallback) {
     std::string norm = normalize_text(text);
     for (const std::string& key : keys) {
@@ -1118,13 +1196,122 @@ void clear_editable_area() {
     InvalidateRect(g_main, nullptr, FALSE);
 }
 
+Rect floating_layer_screen_rect() {
+    if (!g_app.floating_layer || !g_app.image) {
+        return Rect();
+    }
+    return image_rect_to_screen_rect(
+        g_app.floating_layer_source.X + g_app.floating_layer_offset.x,
+        g_app.floating_layer_source.Y + g_app.floating_layer_offset.y,
+        g_app.floating_layer_source.Width,
+        g_app.floating_layer_source.Height);
+}
+
+bool point_inside_rect(int x, int y, const Rect& rect) {
+    return x >= rect.X && y >= rect.Y && x <= rect.X + rect.Width && y <= rect.Y + rect.Height;
+}
+
+void merge_floating_layer() {
+    if (!g_app.image || !g_app.floating_layer) {
+        return;
+    }
+    Graphics image_g(g_app.image.get());
+    image_g.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+    Rect target(
+        g_app.floating_layer_source.X + g_app.floating_layer_offset.x,
+        g_app.floating_layer_source.Y + g_app.floating_layer_offset.y,
+        g_app.floating_layer_source.Width,
+        g_app.floating_layer_source.Height);
+    Rect bounds(0, 0, static_cast<int>(g_app.image->GetWidth()), static_cast<int>(g_app.image->GetHeight()));
+    Gdiplus::Region clip(bounds);
+    image_g.SetClip(&clip, Gdiplus::CombineModeReplace);
+    image_g.DrawImage(g_app.floating_layer.get(), target, 0, 0, target.Width, target.Height, Gdiplus::UnitPixel);
+    g_app.floating_layer.reset();
+    g_app.floating_layer_offset = POINT{};
+    g_app.moving_layer = false;
+    InvalidateRect(g_main, nullptr, FALSE);
+}
+
+void crop_selected_part_to_layer() {
+    if (!g_app.image) {
+        set_status(L"Abra uma imagem antes de recortar.");
+        return;
+    }
+    Part* part = current_part();
+    if (!part) {
+        set_status(L"Selecione uma part para recortar e transformar em camada.");
+        return;
+    }
+    Rect src = editable_source_rect();
+    push_undo_snapshot();
+    g_app.floating_layer.reset(g_app.image->Clone(src, PixelFormat32bppARGB));
+    if (!g_app.floating_layer || g_app.floating_layer->GetLastStatus() != Gdiplus::Ok) {
+        g_app.floating_layer.reset();
+        set_status(L"Falha ao criar camada de recorte.");
+        return;
+    }
+    g_app.floating_layer_source = src;
+    g_app.floating_layer_offset = POINT{};
+    clear_editable_area();
+    set_tool(Tool::Select);
+    set_status(L"Recorte virou camada. Use Selecionar e arraste para mover.");
+}
+
+int rgb_distance(COLORREF a, COLORREF b) {
+    return std::abs(GetRValue(a) - GetRValue(b)) + std::abs(GetGValue(a) - GetGValue(b)) + std::abs(GetBValue(a) - GetBValue(b));
+}
+
+bool recolor_similar_pixels(COLORREF source, COLORREF target, int confidence_percent) {
+    if (!g_app.image) {
+        return false;
+    }
+    Rect edit = editable_source_rect();
+    Gdiplus::BitmapData data{};
+    if (g_app.image->LockBits(&edit, Gdiplus::ImageLockModeRead | Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &data) != Gdiplus::Ok) {
+        set_status(L"Nao foi possivel acessar pixels para pintar por cor.");
+        return false;
+    }
+    int confidence = clamp_int(confidence_percent, 0, 100);
+    int max_distance = (100 - confidence) * 765 / 100;
+    unsigned int out = (255u << 24)
+        | (static_cast<unsigned int>(GetRValue(target)) << 16)
+        | (static_cast<unsigned int>(GetGValue(target)) << 8)
+        | static_cast<unsigned int>(GetBValue(target));
+    int changed = 0;
+    for (int y = 0; y < edit.Height; ++y) {
+        auto* row = static_cast<unsigned char*>(data.Scan0) + static_cast<ptrdiff_t>(y) * data.Stride;
+        auto* pixels = reinterpret_cast<unsigned int*>(row);
+        for (int x = 0; x < edit.Width; ++x) {
+            unsigned int px = pixels[x];
+            if (((px >> 24) & 0xff) == 0) {
+                continue;
+            }
+            COLORREF pixel_color = RGB((px >> 16) & 0xff, (px >> 8) & 0xff, px & 0xff);
+            if (rgb_distance(pixel_color, source) <= max_distance) {
+                unsigned int alpha = px & 0xff000000u;
+                pixels[x] = alpha | (out & 0x00ffffffu);
+                ++changed;
+            }
+        }
+    }
+    g_app.image->UnlockBits(&data);
+    if (changed > 0) {
+        InvalidateRect(g_main, nullptr, FALSE);
+        set_status(L"Genus pintou " + std::to_wstring(changed) + L" pixels pela cor alvo.");
+        return true;
+    }
+    set_status(L"Genus nao encontrou pixels parecidos com a cor alvo.");
+    return false;
+}
+
 std::vector<std::string> split_recipe_lines(std::string recipe) {
     std::replace(recipe.begin(), recipe.end(), ';', '\n');
     std::vector<std::string> lines;
     std::istringstream in(recipe);
     std::string line;
     while (std::getline(in, line)) {
-        if (!normalize_text(line).empty()) {
+        std::string norm = normalize_text(line);
+        if (!norm.empty() && norm[0] != '#') {
             lines.push_back(line);
         }
     }
@@ -1135,39 +1322,71 @@ std::string builtin_recipe_from_prompt(const std::string& prompt) {
     std::ostringstream recipe;
     int template_index = find_template_index_by_text(prompt);
     if (template_index >= 0) {
-        recipe << "template " << g_app.templates[template_index].id << "\n";
+        recipe << "agent-select-template " << g_app.templates[template_index].id << "\n";
     }
+
     int part_index = find_part_index_by_text(prompt);
     if (part_index >= 0 && current_template()) {
-        recipe << "part " << current_template()->parts[part_index].id << "\n";
-    } else if (contains_norm(prompt, "imagem inteira") || contains_norm(prompt, "template todo") || contains_norm(prompt, "tudo")) {
+        recipe << "agent-select-part " << current_template()->parts[part_index].id << "\n";
+    } else if (contains_norm(prompt, "imagem inteira") || contains_norm(prompt, "whole image") || contains_norm(prompt, "full image") || contains_norm(prompt, "template todo") || contains_norm(prompt, "tudo")) {
         recipe << "whole\n";
+    } else {
+        recipe << "agent-select-part\n";
     }
 
-    if (contains_norm(prompt, "borracha") || contains_norm(prompt, "apagar")) {
-        recipe << "tool eraser\n";
-    } else if (contains_norm(prompt, "balde") || contains_norm(prompt, "preencher")) {
-        recipe << "tool bucket\n";
-    } else if (contains_norm(prompt, "lapis") || contains_norm(prompt, "pincel") || contains_norm(prompt, "desenhar") || contains_norm(prompt, "pintar")) {
-        recipe << "tool pencil\n";
+    COLORREF wanted = parse_any_color(prompt, g_app.brush_color);
+    COLORREF source = RGB(255, 210, 0);
+    bool has_source = false;
+    if (contains_norm(prompt, "amarelo") || contains_norm(prompt, "yellow")) {
+        source = parse_any_color("yellow", source);
+        has_source = true;
+    }
+    if (contains_norm(prompt, "azul") || contains_norm(prompt, "blue")) {
+        wanted = parse_any_color("blue", wanted);
+    }
+    if (contains_norm(prompt, "vermelho") || contains_norm(prompt, "red")) {
+        wanted = parse_any_color("red", wanted);
+    }
+    if (contains_norm(prompt, "verde") || contains_norm(prompt, "green")) {
+        wanted = parse_any_color("green", wanted);
     }
 
-    COLORREF parsed = parse_hex_color(prompt, g_app.brush_color);
-    if (parsed != g_app.brush_color || prompt.find('#') != std::string::npos) {
-        wchar_t color[16] = {};
-        swprintf_s(color, L"#%02X%02X%02X", GetRValue(parsed), GetGValue(parsed), GetBValue(parsed));
-        recipe << "color " << narrow(color) << "\n";
+    if (contains_norm(prompt, "recortar") || contains_norm(prompt, "recorte") || contains_norm(prompt, "crop") || contains_norm(prompt, "cut out")) {
+        recipe << "agent-select-ferramenta crop\n";
+        recipe << "agent-crop-layer\n";
+        return recipe.str();
     }
 
-    int size = number_after_any(prompt, {"tamanho", "size", "pincel"}, -1);
+    if (contains_norm(prompt, "borracha") || contains_norm(prompt, "eraser") || contains_norm(prompt, "apagar")) {
+        recipe << "agent-select-ferramenta eraser\n";
+    } else if (contains_norm(prompt, "balde") || contains_norm(prompt, "bucket") || contains_norm(prompt, "preencher") || contains_norm(prompt, "fill")) {
+        recipe << "agent-select-ferramenta bucket\n";
+    } else if (contains_norm(prompt, "selecionar") || contains_norm(prompt, "select")) {
+        recipe << "agent-select-ferramenta select\n";
+    } else {
+        recipe << "agent-select-ferramenta pencil\n";
+    }
+
+    if (wanted != g_app.brush_color || prompt.find('#') != std::string::npos || contains_norm(prompt, "azul") || contains_norm(prompt, "blue") || contains_norm(prompt, "vermelho") || contains_norm(prompt, "red") || contains_norm(prompt, "verde") || contains_norm(prompt, "green")) {
+        recipe << "color " << color_to_hex(wanted) << "\n";
+    }
+    if (has_source) {
+        recipe << "source-color " << color_to_hex(source) << "\n";
+    }
+
+    int size = number_after_any(prompt, {"tamanho", "size", "pincel", "brush"}, -1);
     if (size >= 0) {
         recipe << "size " << size << "\n";
     }
-    int opacity = number_after_any(prompt, {"opacidade", "opacity", "transparencia", "transparencia"}, -1);
+    int opacity = number_after_any(prompt, {"opacidade", "opacity", "transparencia", "transparÃªncia"}, -1);
     if (opacity >= 0) {
         recipe << "opacity " << opacity << "\n";
     }
-    int tolerance = number_after_any(prompt, {"confianca", "confiança", "tolerancia", "tolerance"}, -1);
+    int confidence = number_after_any(prompt, {"confianca", "confianÃ§a", "confidence", "similaridade"}, -1);
+    if (confidence >= 0) {
+        recipe << "confidence " << confidence << "\n";
+    }
+    int tolerance = number_after_any(prompt, {"tolerancia", "tolerÃ¢ncia", "tolerance"}, -1);
     if (tolerance >= 0) {
         recipe << "tolerance " << tolerance << "\n";
     }
@@ -1176,17 +1395,25 @@ std::string builtin_recipe_from_prompt(const std::string& prompt) {
     } else if (contains_norm(prompt, "redondo") || contains_norm(prompt, "round")) {
         recipe << "shape round\n";
     }
-    if (contains_norm(prompt, "limpar") || contains_norm(prompt, "apagar parte")) {
+
+    if (contains_norm(prompt, "limpar") || contains_norm(prompt, "clear") || contains_norm(prompt, "apagar parte") || ((part_index >= 0 || contains_norm(prompt, "part") || contains_norm(prompt, "parte")) && (contains_norm(prompt, "apaga") || contains_norm(prompt, "apagar") || contains_norm(prompt, "remover") || contains_norm(prompt, "remove") || contains_norm(prompt, "deletar") || contains_norm(prompt, "delete")))) {
         recipe << "clear\n";
+    } else if ((contains_norm(prompt, "amarelo") || contains_norm(prompt, "yellow")) && (contains_norm(prompt, "azul") || contains_norm(prompt, "blue") || contains_norm(prompt, "cor") || contains_norm(prompt, "color"))) {
+        recipe << "agent-pintar\n";
     } else if (contains_norm(prompt, "preencher") || contains_norm(prompt, "encher") || contains_norm(prompt, "fill")) {
-        recipe << "fill\n";
+        recipe << "agent-fill\n";
     }
+    recipe << "agent-rate\n";
     return recipe.str();
 }
 
 bool execute_genus_recipe(const std::string& recipe, std::wstring* report = nullptr) {
     bool changed_image = false;
     bool changed_state = false;
+    COLORREF source_color = RGB(255, 210, 0);
+    bool has_source_color = false;
+    int confidence_percent = 72;
+
     for (std::string line : split_recipe_lines(recipe)) {
         std::string norm = normalize_text(line);
         std::istringstream in(norm);
@@ -1195,9 +1422,49 @@ bool execute_genus_recipe(const std::string& recipe, std::wstring* report = null
         std::string rest;
         std::getline(in, rest);
 
+        if (command == "agent-select-template") {
+            command = "template";
+        } else if (command == "agent-select-part") {
+            if (normalize_text(rest).empty()) {
+                if (!current_part() && current_template() && !current_template()->parts.empty()) {
+                    g_app.selected_part = 0;
+                    SendMessageW(g_parts, LB_SETCURSEL, g_app.selected_part, 0);
+                    changed_state = true;
+                }
+                continue;
+            }
+            command = "part";
+        } else if (command == "agent-select-ferramenta" || command == "agent-select-tool") {
+            command = "tool";
+        } else if (command == "agent-fill") {
+            command = "fill";
+        } else if (command == "agent-brush") {
+            command = "tool";
+            rest = " pencil";
+        } else if (command == "agent-crop-layer" || command == "agent-recorte") {
+            if (g_app.image) {
+                crop_selected_part_to_layer();
+                changed_image = true;
+            }
+            continue;
+        } else if (command == "agent-rate") {
+            set_status(L"Genus executou. Avalie de 0-10 depois com: rate 8 / nota 8.");
+            continue;
+        } else if (command == "agent-pintar" || command == "agent-paint" || command == "recolor") {
+            if (g_app.image) {
+                push_undo_snapshot();
+                COLORREF from = has_source_color ? source_color : RGB(255, 210, 0);
+                if (recolor_similar_pixels(from, g_app.brush_color, confidence_percent)) {
+                    changed_image = true;
+                }
+            }
+            continue;
+        }
+
         if (command == "template") {
             int index = find_template_index_by_text(rest);
             if (index >= 0 && index != g_app.selected_template) {
+                merge_floating_layer();
                 g_app.selected_template = index;
                 g_app.selected_part = 0;
                 rebuild_parts();
@@ -1215,12 +1482,14 @@ bool execute_genus_recipe(const std::string& recipe, std::wstring* report = null
             g_app.selected_part = -1;
             SendMessageW(g_parts, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
             changed_state = true;
-        } else if (command == "tool") {
+        } else if (command == "tool" || command == "ferramenta") {
             if (contains_norm(rest, "eraser") || contains_norm(rest, "borracha")) {
                 set_tool(Tool::Eraser);
             } else if (contains_norm(rest, "bucket") || contains_norm(rest, "balde")) {
                 set_tool(Tool::Bucket);
-            } else if (contains_norm(rest, "pencil") || contains_norm(rest, "lapis") || contains_norm(rest, "pincel")) {
+            } else if (contains_norm(rest, "crop") || contains_norm(rest, "recorte") || contains_norm(rest, "recortar")) {
+                set_tool(Tool::Crop);
+            } else if (contains_norm(rest, "pencil") || contains_norm(rest, "brush") || contains_norm(rest, "lapis") || contains_norm(rest, "pincel")) {
                 set_tool(Tool::Pencil);
             } else if (contains_norm(rest, "select") || contains_norm(rest, "selecionar")) {
                 set_tool(Tool::Select);
@@ -1235,14 +1504,22 @@ bool execute_genus_recipe(const std::string& recipe, std::wstring* report = null
         } else if (command == "opacity") {
             set_active_tool_opacity(number_after_any("opacity " + rest, {"opacity"}, active_tool_opacity()));
             changed_state = true;
-        } else if (command == "tolerance" || command == "confidence" || command == "confianca") {
+        } else if (command == "tolerance" || command == "tolerancia") {
             g_app.bucket_tolerance = clamp_int(number_after_any("tolerance " + rest, {"tolerance"}, g_app.bucket_tolerance), 0, 255);
+            changed_state = true;
+        } else if (command == "confidence" || command == "confianca") {
+            confidence_percent = clamp_int(number_after_any("confidence " + rest, {"confidence"}, confidence_percent), 0, 100);
+            g_app.bucket_tolerance = confidence_percent;
             changed_state = true;
         } else if (command == "shape") {
             g_app.brush_shape = contains_norm(rest, "square") || contains_norm(rest, "quadrado") ? BrushShape::Square : BrushShape::Round;
             changed_state = true;
         } else if (command == "color" || command == "cor") {
-            g_app.brush_color = parse_hex_color(line, g_app.brush_color);
+            g_app.brush_color = parse_any_color(line, g_app.brush_color);
+            changed_state = true;
+        } else if (command == "source-color" || command == "source" || command == "alvo" || command == "cor-alvo") {
+            source_color = parse_any_color(line, source_color);
+            has_source_color = true;
             changed_state = true;
         } else if (command == "fill" || command == "preencher") {
             if (g_app.image) {
@@ -1260,13 +1537,16 @@ bool execute_genus_recipe(const std::string& recipe, std::wstring* report = null
                 clear_editable_area();
                 changed_image = true;
             }
+        } else if (command == "crop" || command == "recorte" || command == "recortar") {
+            crop_selected_part_to_layer();
+            changed_image = true;
         }
     }
     sync_tool_controls_after_ai();
     if (report) {
         *report = changed_image
-            ? L"Genus executou a receita e alterou a textura."
-            : (changed_state ? L"Genus ajustou o editor pela receita." : L"Genus nao encontrou acoes validas na receita.");
+            ? L"Genus executou e alterou a textura."
+            : (changed_state ? L"Genus ajustou o editor." : L"Genus nao encontrou acoes validas.");
     }
     return changed_image || changed_state;
 }
@@ -1325,15 +1605,89 @@ std::string find_trained_genus_recipe(const std::string& request) {
     return best_score > 0 ? best_recipe : "";
 }
 
+bool genus_recipe_has_real_action(const std::string& recipe) {
+    std::string norm = normalize_text(recipe);
+    return norm.find("agent pintar") != std::string::npos
+        || norm.find("agent paint") != std::string::npos
+        || norm.find("agent fill") != std::string::npos
+        || norm.find("agent crop layer") != std::string::npos
+        || norm.find("clear") != std::string::npos
+        || norm.find("limpar") != std::string::npos
+        || norm.find("crop") != std::string::npos
+        || norm.find("recorte") != std::string::npos
+        || norm.find("color") != std::string::npos
+        || norm.find("source color") != std::string::npos
+        || norm.find("size") != std::string::npos
+        || norm.find("opacity") != std::string::npos
+        || norm.find("confidence") != std::string::npos
+        || norm.find("tolerance") != std::string::npos
+        || norm.find("agent select ferramenta pencil") != std::string::npos
+        || norm.find("agent select ferramenta brush") != std::string::npos
+        || norm.find("agent select ferramenta eraser") != std::string::npos
+        || norm.find("agent select ferramenta bucket") != std::string::npos
+        || norm.find("agent select ferramenta crop") != std::string::npos
+        || norm.find("agent select ferramenta select") != std::string::npos;
+}
+
+std::string default_teach_recipe_for_prompt(const std::string& prompt) {
+    std::ostringstream out;
+    out << "# Scratch IA do Genus - ensine como executar este pedido.\n";
+    out << "# Pedido original: " << prompt << "\n";
+    out << "# Use uma receita simples. Exemplos:\n";
+    out << "# Apagar uma parte: agent-select-part hammer  -> clear\n";
+    out << "# Recortar camada: agent-select-ferramenta crop -> agent-crop-layer\n";
+    out << "# Recolorir: source-color yellow -> color #267EFF -> confidence 65 -> agent-pintar\n";
+    out << "agent-select-part\n";
+    out << "# agent-select-ferramenta select|pencil|eraser|bucket|crop\n";
+    out << "# color #267EFF\n";
+    out << "# source-color yellow\n";
+    out << "# confidence 65\n";
+    out << "# agent-fill\n";
+    out << "# agent-crop-layer\n";
+    out << "clear\n";
+    out << "agent-rate\n";
+    return out.str();
+}
+
+void begin_ai_teach_mode(const std::string& prompt) {
+    g_app.ai_teach_mode = true;
+    g_app.dev_mode = true;
+    g_app.last_ai_prompt = prompt;
+    if (g_dev_check) {
+        SendMessageW(g_dev_check, BM_SETCHECK, BST_CHECKED, 0);
+    }
+    SetWindowTextW(g_ai_steps, widen(default_teach_recipe_for_prompt(prompt)).c_str());
+    layout(g_main);
+    set_status(L"Genus nao soube fazer. Edite a receita com agent-* e clique em Salvar ensino.");
+}
+
+bool handle_genus_rating(const std::string& prompt) {
+    int rating = number_after_any(prompt, {"rate", "rating", "nota", "avaliacao", "avaliaÃ§Ã£o"}, -1);
+    if (rating < 0) {
+        return false;
+    }
+    rating = clamp_int(rating, 0, 10);
+    fs::path train_dir = g_app.root / "IA-TRAIN";
+    fs::create_directories(train_dir);
+    std::ofstream file(train_dir / "genus-ratings.jsonl", std::ios::binary | std::ios::app);
+    file << "{\"agent\":\"agent-rate\",\"rating\":" << rating << ",\"request\":\"" << escape_json(g_app.last_ai_prompt) << "\"}\n";
+    set_status(L"Nota salva para o agent-rate: " + std::to_wstring(rating) + L"/10.");
+    return true;
+}
+
 void train_genus() {
-    std::wstring prompt = read_control(g_ai_prompt);
-    if (prompt.empty()) {
-        set_status(L"Digite um pedido para treinar o Genus.");
+    std::wstring prompt_w = read_control(g_ai_prompt);
+    std::string prompt = narrow(prompt_w);
+    if (normalize_text(prompt).empty()) {
+        prompt = g_app.last_ai_prompt;
+    }
+    if (normalize_text(prompt).empty()) {
+        set_status(L"Digite um pedido para o Genus antes de salvar ensino.");
         return;
     }
     std::string recipe = narrow(read_control(g_ai_steps));
     if (normalize_text(recipe).empty()) {
-        recipe = recipe_from_current_state();
+        recipe = default_teach_recipe_for_prompt(prompt);
     }
     fs::path train_dir = g_app.root / "IA-TRAIN";
     fs::create_directories(train_dir);
@@ -1345,33 +1699,108 @@ void train_genus() {
     }
     std::string template_id = current_template() ? current_template()->id : "";
     std::string part_id = current_part() ? current_part()->id : "";
-    file << "{\"agent\":\"Genus\",\"request\":\"" << escape_json(narrow(prompt))
+    file << "{\"agent\":\"Genus\",\"request\":\"" << escape_json(prompt)
          << "\",\"recipe\":\"" << escape_json(recipe)
          << "\",\"template\":\"" << escape_json(template_id)
          << "\",\"part\":\"" << escape_json(part_id)
          << "\",\"tool\":\"" << escape_json(narrow(tool_name(g_app.tool)))
          << "\"}\n";
+    g_app.ai_teach_mode = false;
     SetWindowTextW(g_ai_prompt, L"");
-    set_status(L"Genus treinado com pedido + receita em IA-TRAIN/genus-training.jsonl.");
+    layout(g_main);
+    set_status(L"Ensino salvo. Agora use Enviar com um pedido parecido.");
 }
 
+std::wstring quote_cmd_arg(const std::wstring& value) {
+    std::wstring out = L"\"";
+    for (wchar_t ch : value) {
+        if (ch == L'\"') {
+            out += L"\\\"";
+        } else {
+            out += ch;
+        }
+    }
+    out += L"\"";
+    return out;
+}
+
+std::string run_process_capture(const std::wstring& command) {
+    std::string output;
+    FILE* pipe = _wpopen(command.c_str(), L"r");
+    if (!pipe) {
+        return output;
+    }
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), pipe)) {
+        output += buffer;
+        if (output.size() > 16384) {
+            break;
+        }
+    }
+    _pclose(pipe);
+    while (!output.empty() && (output.back() == '\n' || output.back() == '\r' || output.back() == ' ' || output.back() == '\t')) {
+        output.pop_back();
+    }
+    return output;
+}
+
+std::string cloud_genus_recipe(const std::string& prompt) {
+    fs::path train_dir = g_app.root / "IA-TRAIN";
+    fs::create_directories(train_dir);
+    fs::path script = train_dir / "genus_ai_bridge.py";
+    if (!fs::exists(script)) {
+        return "";
+    }
+    fs::path prompt_file = train_dir / "genus-last-prompt.txt";
+    {
+        std::ofstream out(prompt_file, std::ios::binary);
+        if (!out) {
+            return "";
+        }
+        out << prompt;
+    }
+    std::wstring command = L"py -3 " + quote_cmd_arg(script.wstring()) + L" --prompt-file " + quote_cmd_arg(prompt_file.wstring());
+    std::string recipe = run_process_capture(command);
+    std::string norm_recipe = normalize_text(recipe);
+    if (recipe.empty() || norm_recipe.find("#ai_") == 0) {
+        return "";
+    }
+    if (!genus_recipe_has_real_action(recipe)) {
+        return "";
+    }
+    return recipe;
+}
 void run_genus() {
     std::string prompt = narrow(read_control(g_ai_prompt));
     if (normalize_text(prompt).empty()) {
-        set_status(L"Digite um pedido para o Genus tentar executar.");
+        set_status(L"Digite um pedido para o Genus executar.");
         return;
     }
+    if (handle_genus_rating(prompt)) {
+        return;
+    }
+    g_app.last_ai_prompt = prompt;
     std::string recipe = find_trained_genus_recipe(prompt);
-    std::wstring source = L"treino";
+    std::wstring source = L"ensino salvo";
+    if (recipe.empty()) {
+        recipe = cloud_genus_recipe(prompt);
+        source = L"IA externa";
+    }
     if (recipe.empty()) {
         recipe = builtin_recipe_from_prompt(prompt);
-        source = L"parser interno";
+        source = L"parser PT/EN local";
+        if (!genus_recipe_has_real_action(recipe)) {
+            begin_ai_teach_mode(prompt);
+            return;
+        }
     }
     std::wstring report;
     if (execute_genus_recipe(recipe, &report)) {
+        g_app.ai_teach_mode = false;
+        layout(g_main);
         set_status(report + L" Fonte: " + source + L".");
     } else {
-        set_status(L"Genus ainda nao sabe fazer isso. Escreva uma receita no modo-dev e clique em Treinar.");
+        begin_ai_teach_mode(prompt);
     }
 }
 
@@ -1447,6 +1876,7 @@ void layout(HWND hwnd) {
     MoveWindow(g_pencil_tool, 9, content_top + 54, 40, 36, TRUE);
     MoveWindow(g_eraser_tool, 9, content_top + 98, 40, 36, TRUE);
     MoveWindow(g_bucket_tool, 9, content_top + 142, 40, 36, TRUE);
+    MoveWindow(g_crop_tool, 9, content_top + 186, 40, 36, TRUE);
 
     HWND brush_label = GetDlgItem(hwnd, 2007);
     MoveWindow(brush_label, canvas_x, UI_MENU_H + 12, 58, 22, TRUE);
@@ -1472,7 +1902,7 @@ void layout(HWND hwnd) {
     MoveWindow(g_tool_preview, right_x, y, right_panel_w - 24, 136, TRUE);
     y += 154;
 
-    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_apply, g_new_part, g_delete_part, g_part_up, g_part_down, g_save, g_ai_prompt, g_ai_steps, g_ai_train, g_ai_run};
+    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_apply, g_new_part, g_delete_part, g_part_up, g_part_down, g_save, g_ai_prompt, g_ai_steps, g_ai_run};
     for (HWND child : children) {
         ShowWindow(child, g_app.dev_mode ? SW_SHOW : SW_HIDE);
     }
@@ -1502,13 +1932,17 @@ void layout(HWND hwnd) {
         MoveWindow(g_part_down, right_x + (right_panel_w - 34) / 2 + 10, y + 82, (right_panel_w - 34) / 2, 30, TRUE);
         MoveWindow(g_save, right_x, y + 128, right_panel_w - 24, 34, TRUE);
         MoveWindow(g_ai_prompt, right_x, y + 176, right_panel_w - 24, 28, TRUE);
-        MoveWindow(g_ai_steps, right_x, y + 210, right_panel_w - 24, 58, TRUE);
-        MoveWindow(g_ai_run, right_x, y + 276, (right_panel_w - 34) / 2, 30, TRUE);
-        MoveWindow(g_ai_train, right_x + (right_panel_w - 34) / 2 + 10, y + 276, (right_panel_w - 34) / 2, 30, TRUE);
+        MoveWindow(g_ai_run, right_x, y + 210, right_panel_w - 24, 32, TRUE);
+        MoveWindow(g_ai_steps, right_x, y + 252, right_panel_w - 24, 92, TRUE);
+        MoveWindow(g_ai_train, right_x, y + 352, right_panel_w - 24, 30, TRUE);
+        ShowWindow(g_ai_steps, g_app.ai_teach_mode ? SW_SHOW : SW_HIDE);
+        ShowWindow(g_ai_train, g_app.ai_teach_mode ? SW_SHOW : SW_HIDE);
     } else {
         for (int id = 2001; id <= 2006; ++id) {
             ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
         }
+        ShowWindow(g_ai_steps, SW_HIDE);
+        ShowWindow(g_ai_train, SW_HIDE);
     }
     layout_tool_panel_controls(hwnd);
     InvalidateRect(hwnd, nullptr, TRUE);
@@ -1679,6 +2113,7 @@ void set_tool(Tool tool) {
     SendMessageW(g_pencil_tool, BM_SETCHECK, tool == Tool::Pencil ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_eraser_tool, BM_SETCHECK, tool == Tool::Eraser ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_bucket_tool, BM_SETCHECK, tool == Tool::Bucket ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_crop_tool, BM_SETCHECK, tool == Tool::Crop ? BST_CHECKED : BST_UNCHECKED, 0);
     invalidate_tool_ui();
     set_status(std::wstring(L"Ferramenta ativa: ") + tool_name(tool));
 }
@@ -1999,7 +2434,7 @@ void draw_tool_options_panel(Graphics& g) {
         g.FillEllipse(&stamp, cx - preview_size / 2, cy - preview_size / 2, preview_size, preview_size);
     }
 
-    std::wstring title = std::wstring(g_app.tool == Tool::Eraser ? L"Borracha" : (g_app.tool == Tool::Bucket ? L"Balde" : L"Lapis")) + L" profissional";
+    std::wstring title = std::wstring(g_app.tool == Tool::Eraser ? L"Borracha" : (g_app.tool == Tool::Bucket ? L"Balde" : (g_app.tool == Tool::Crop ? L"Recorte" : L"Lapis"))) + L" profissional";
     g.DrawString(title.c_str(), -1, &title_font, Gdiplus::PointF(static_cast<float>(panel.X + 132), static_cast<float>(panel.Y + 20)), &title_brush);
     g.DrawString(L"Tamanho:", -1, &label_font, Gdiplus::PointF(static_cast<float>(panel.X + 132), static_cast<float>(panel.Y + 54)), &label_brush);
     g.DrawString(g_app.tool == Tool::Bucket ? L"Confianca:" : L"Dureza:", -1, &label_font, Gdiplus::PointF(static_cast<float>(panel.X + 132), static_cast<float>(panel.Y + 100)), &label_brush);
@@ -2094,7 +2529,8 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
     g.DrawRectangle(&layers_border, layers);
     g.DrawString(L"Camadas", -1, &agent_title, Gdiplus::PointF(static_cast<float>(layers.X + 12), static_cast<float>(layers.Y + 10)), &brand);
     g.DrawString(L"Base: Template", -1, &agent_text_font, Gdiplus::PointF(static_cast<float>(layers.X + 12), static_cast<float>(layers.Y + 36)), &muted);
-    g.DrawString(L"Proximo: recorte vira camada editavel.", -1, &agent_text_font, Gdiplus::PointF(static_cast<float>(layers.X + 12), static_cast<float>(layers.Y + 58)), &muted);
+    std::wstring layer_line = g_app.floating_layer ? L"Recorte: camada movivel ativa" : L"Recorte: sem camada ativa";
+    g.DrawString(layer_line.c_str(), -1, &agent_text_font, Gdiplus::PointF(static_cast<float>(layers.X + 12), static_cast<float>(layers.Y + 58)), &muted);
 
     Rect canvas = canvas_rect(hwnd);
     SolidBrush canvas_brush(Color(255, 9, 11, 15));
@@ -2120,6 +2556,12 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
         g_app.image_rect = fit_image_rect(canvas, g_app.image.get());
         draw_image_checker(g);
         g.DrawImage(g_app.image.get(), g_app.image_rect);
+        if (g_app.floating_layer) {
+            Rect layer_rect = floating_layer_screen_rect();
+            g.DrawImage(g_app.floating_layer.get(), layer_rect, 0, 0, static_cast<int>(g_app.floating_layer->GetWidth()), static_cast<int>(g_app.floating_layer->GetHeight()), Gdiplus::UnitPixel);
+            Pen layer_pen(Color(245, 255, 226, 90), 2.0f);
+            g.DrawRectangle(&layer_pen, layer_rect);
+        }
         draw_pixel_grid(g);
 
         Part* part = current_part();
@@ -2176,7 +2618,7 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
         }
     }
 
-    if (g_app.image && g_app.hover_canvas && g_app.tool != Tool::Select) {
+    if (g_app.image && g_app.hover_canvas && g_app.tool != Tool::Select && g_app.tool != Tool::Crop) {
         POINT p = screen_to_image_point(g_app.hover_mouse.x, g_app.hover_mouse.y);
         if (image_point_inside_editable(p)) {
             double sx = static_cast<double>(g_app.image_rect.Width) / g_app.image->GetWidth();
@@ -2280,7 +2722,7 @@ HWND make_button(HWND parent, const wchar_t* text, DWORD style, int id) {
 }
 
 void invalidate_tool_ui() {
-    HWND buttons[] = {g_select_tool, g_pencil_tool, g_eraser_tool, g_bucket_tool, g_color_pick, g_tool_preview, g_shape_round, g_shape_square};
+    HWND buttons[] = {g_select_tool, g_pencil_tool, g_eraser_tool, g_bucket_tool, g_crop_tool, g_color_pick, g_tool_preview, g_shape_round, g_shape_square};
     for (HWND hwnd : buttons) {
         if (hwnd) {
             InvalidateRect(hwnd, nullptr, TRUE);
@@ -2293,7 +2735,7 @@ bool is_checked_button(int id) {
         HWND button = id == ID_SHAPE_ROUND ? g_shape_round : g_shape_square;
         return button && SendMessageW(button, BM_GETCHECK, 0, 0) == BST_CHECKED;
     }
-    if (id == ID_DEV || id == ID_SHOW_ALL || id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER || id == ID_TOOL_BUCKET) {
+    if (id == ID_DEV || id == ID_SHOW_ALL || id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER || id == ID_TOOL_BUCKET || id == ID_TOOL_CROP) {
         HWND button = GetDlgItem(g_main, id);
         return button && SendMessageW(button, BM_GETCHECK, 0, 0) == BST_CHECKED;
     }
@@ -2326,6 +2768,14 @@ void draw_tool_icon(HDC dc, int id, RECT r, COLORREF color) {
         POINT pts[] = {{cx - 8, cy - 2}, {cx + 2, cy - 10}, {cx + 10, cy - 2}, {cx, cy + 8}};
         Polygon(dc, pts, 4);
         Ellipse(dc, cx + 6, cy + 6, cx + 12, cy + 12);
+    } else if (id == ID_TOOL_CROP) {
+        MoveToEx(dc, cx - 9, cy - 8, nullptr);
+        LineTo(dc, cx - 9, cy + 7);
+        LineTo(dc, cx + 8, cy + 7);
+        MoveToEx(dc, cx - 2, cy - 10, nullptr);
+        LineTo(dc, cx - 2, cy + 10);
+        MoveToEx(dc, cx - 11, cy, nullptr);
+        LineTo(dc, cx + 11, cy);
     } else if (id == ID_ZOOM_IN || id == ID_ZOOM_OUT) {
         Ellipse(dc, cx - 7, cy - 7, cx + 5, cy + 5);
         MoveToEx(dc, cx + 4, cy + 4, nullptr);
@@ -2445,10 +2895,10 @@ void draw_owner_button(const DRAWITEMSTRUCT* item) {
     }
 
     int id = static_cast<int>(item->CtlID);
-    bool has_icon = id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER || id == ID_TOOL_BUCKET || id == ID_ZOOM_IN || id == ID_ZOOM_OUT;
+    bool has_icon = id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER || id == ID_TOOL_BUCKET || id == ID_TOOL_CROP || id == ID_ZOOM_IN || id == ID_ZOOM_OUT;
     if (has_icon) {
         draw_tool_icon(item->hDC, id, r, text);
-        if ((r.right - r.left) <= 48 && (id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER || id == ID_TOOL_BUCKET)) {
+        if ((r.right - r.left) <= 48 && (id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER || id == ID_TOOL_BUCKET || id == ID_TOOL_CROP)) {
             return;
         }
         r.left += 28;
@@ -2588,7 +3038,7 @@ void draw_tool_preview(const DRAWITEMSTRUCT* item) {
     hint.right -= 10;
     hint.bottom -= 8;
     SetTextColor(item->hDC, RGB(177, 186, 201));
-    DrawTextW(item->hDC, L"Botao direito: opcoes\nCtrl+Z / Ctrl+Y\nCtrl + roda: zoom", -1, &hint, DT_LEFT | DT_WORDBREAK);
+    DrawTextW(item->hDC, L"Enviar: Genus executa\nRecorte vira camada\nCtrl + roda: zoom", -1, &hint, DT_LEFT | DT_WORDBREAK);
 }
 
 void sync_options_controls() {
@@ -2923,6 +3373,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_pencil_tool = make_button(hwnd, L"Lapis", BS_AUTORADIOBUTTON, ID_TOOL_PENCIL);
         g_eraser_tool = make_button(hwnd, L"Borracha", BS_AUTORADIOBUTTON, ID_TOOL_ERASER);
         g_bucket_tool = make_button(hwnd, L"Balde", BS_AUTORADIOBUTTON, ID_TOOL_BUCKET);
+        g_crop_tool = make_button(hwnd, L"Recorte", BS_AUTORADIOBUTTON, ID_TOOL_CROP);
         g_color_pick = make_button(hwnd, L"Cor", BS_PUSHBUTTON, ID_COLOR_PICK);
         g_zoom_out = make_button(hwnd, L"-", BS_PUSHBUTTON, ID_ZOOM_OUT);
         g_zoom_label = make_child(hwnd, L"STATIC", L"Fit", SS_CENTER, 0);
@@ -2960,9 +3411,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_part_down = make_button(hwnd, L"Descer", BS_PUSHBUTTON, ID_PART_DOWN);
         g_save = make_button(hwnd, L"Salvar JSON", BS_PUSHBUTTON, ID_SAVE);
         g_ai_prompt = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, ID_AI_PROMPT);
-        g_ai_steps = make_child(hwnd, L"EDIT", L"tool bucket\r\nfill", WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, ID_AI_STEPS);
-        g_ai_run = make_button(hwnd, L"Tentar", BS_PUSHBUTTON, ID_AI_RUN);
-        g_ai_train = make_button(hwnd, L"Treinar", BS_PUSHBUTTON, ID_AI_TRAIN);
+        g_ai_steps = make_child(hwnd, L"EDIT", L"agent-select-part\r\nagent-select-ferramenta pencil\r\nagent-pintar", WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, ID_AI_STEPS);
+        g_ai_run = make_button(hwnd, L"Enviar", BS_PUSHBUTTON, ID_AI_RUN);
+        g_ai_train = make_button(hwnd, L"Salvar ensino", BS_PUSHBUTTON, ID_AI_TRAIN);
         g_options_size = make_child(hwnd, L"EDIT", L"8", WS_BORDER | ES_NUMBER, ID_OPTIONS_SIZE);
         g_options_hardness = make_child(hwnd, L"EDIT", L"100", WS_BORDER | ES_NUMBER, ID_HARDNESS);
         g_options_opacity = make_child(hwnd, L"EDIT", L"100", WS_BORDER | ES_NUMBER, ID_OPACITY);
@@ -2998,7 +3449,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         return 0;
     case WM_TIMER:
         if (wparam == ID_FRAME_TIMER && !IsIconic(hwnd)) {
-            if (g_app.hover_canvas || g_app.drawing || g_app.panning || g_app.tool_panel_open) {
+            if (g_app.hover_canvas || g_app.drawing || g_app.panning || g_app.moving_layer || g_app.tool_panel_open) {
                 Rect canvas = canvas_rect(hwnd);
                 int hover_size = std::max(64, g_app.brush_size + 34);
                 RECT dirty{g_app.hover_mouse.x - hover_size, g_app.hover_mouse.y - hover_size, g_app.hover_mouse.x + hover_size, g_app.hover_mouse.y + hover_size};
@@ -3045,7 +3496,19 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             }
         }
         if (g_app.tool == Tool::Select) {
-            select_part_from_point(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+            int mx = GET_X_LPARAM(lparam);
+            int my = GET_Y_LPARAM(lparam);
+            if (g_app.floating_layer && point_inside_rect(mx, my, floating_layer_screen_rect())) {
+                g_app.moving_layer = true;
+                g_app.layer_drag_start = {mx, my};
+                g_app.layer_offset_start = g_app.floating_layer_offset;
+                SetCapture(hwnd);
+                set_status(L"Movendo camada de recorte.");
+            } else {
+                select_part_from_point(mx, my);
+            }
+        } else if (g_app.tool == Tool::Crop) {
+            crop_selected_part_to_layer();
         } else if (g_app.tool == Tool::Bucket) {
             push_undo_snapshot();
             bucket_fill_at(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
@@ -3063,6 +3526,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             ReleaseCapture();
             return 0;
         }
+        if (g_app.moving_layer) {
+            g_app.moving_layer = false;
+            ReleaseCapture();
+            set_status(L"Camada de recorte reposicionada. Salvar PNG mescla a camada.");
+            return 0;
+        }
         if (g_app.drawing) {
             g_app.drawing = false;
             ReleaseCapture();
@@ -3074,9 +3543,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             g_app.panning = true;
             g_app.last_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             SetCapture(hwnd);
-        } else {
+        } else if (g_app.tool != Tool::Select) {
             POINT screen_pos{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             show_options_window(screen_pos);
+        } else {
+            set_status(L"Selecionar ativo: botao direito nao abre opcoes. Use Alt+direito ou botao do meio para pan.");
         }
         return 0;
     case WM_RBUTTONUP:
@@ -3119,6 +3590,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             int y = GET_Y_LPARAM(lparam);
             paint_stroke(g_app.last_mouse.x, g_app.last_mouse.y, x, y, g_app.tool);
             g_app.last_mouse = {x, y};
+        } else if (g_app.moving_layer && g_app.floating_layer && g_app.image && g_app.image_rect.Width > 0 && g_app.image_rect.Height > 0) {
+            int x = GET_X_LPARAM(lparam);
+            int y = GET_Y_LPARAM(lparam);
+            double sx = static_cast<double>(g_app.image->GetWidth()) / g_app.image_rect.Width;
+            double sy = static_cast<double>(g_app.image->GetHeight()) / g_app.image_rect.Height;
+            g_app.floating_layer_offset.x = g_app.layer_offset_start.x + static_cast<int>(std::round((x - g_app.layer_drag_start.x) * sx));
+            g_app.floating_layer_offset.y = g_app.layer_offset_start.y + static_cast<int>(std::round((y - g_app.layer_drag_start.y) * sy));
+            InvalidateRect(hwnd, nullptr, FALSE);
         } else if (g_app.active_slider != 0) {
             update_tool_panel_slider(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), false);
         } else if (g_app.panning) {
@@ -3142,7 +3621,6 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             }
             RECT hud_rect{canvas.X + 8, canvas.Y + canvas.Height - 42, canvas.X + 390, canvas.Y + canvas.Height - 4};
             InvalidateRect(hwnd, &hud_rect, FALSE);
-            UpdateWindow(hwnd);
         }
         return 0;
     }
@@ -3306,6 +3784,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         case ID_TOOL_BUCKET:
             close_tool_panel();
             set_tool(Tool::Bucket);
+            return 0;
+        case ID_TOOL_CROP:
+            close_tool_panel();
+            set_tool(Tool::Crop);
             return 0;
         case ID_COLOR_PICK:
             choose_brush_color(hwnd);

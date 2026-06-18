@@ -12,3 +12,12 @@ __pycache__/
 dist/
 venv/
 .venv/
+.env.local
+IA-TRAIN/genus_keys.txt
+IA-TRAIN/.env.local
+IA-TRAIN/*.secret*
+IA-TRAIN/genus-ai-calls.jsonl
+IA-TRAIN/genus-last-prompt.txt
+IA-TRAIN/genus-training.jsonl
+IA-TRAIN/genus-ratings.jsonl
+IA-TRAIN/genus-simulations.jsonl
