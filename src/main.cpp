@@ -87,11 +87,15 @@ struct AppState {
     POINT hover_mouse{};
     bool hover_canvas = false;
     bool tracking_mouse = false;
+    bool tool_panel_open = false;
+    double part_scale_x = 1.0;
+    double part_scale_y = 1.0;
     std::unique_ptr<Bitmap> image;
     std::vector<std::unique_ptr<Bitmap>> undo_stack;
     std::vector<std::unique_ptr<Bitmap>> redo_stack;
     Rect image_rect;
     Rect preview_rect;
+    Rect tool_panel_rect;
     ULONG_PTR gdiplus_token = 0;
 };
 
@@ -110,6 +114,8 @@ HWND g_h = nullptr;
 HWND g_apply = nullptr;
 HWND g_new_part = nullptr;
 HWND g_delete_part = nullptr;
+HWND g_part_up = nullptr;
+HWND g_part_down = nullptr;
 HWND g_save = nullptr;
 HWND g_open = nullptr;
 HWND g_save_png = nullptr;
@@ -128,6 +134,8 @@ HWND g_options = nullptr;
 HWND g_tool_preview = nullptr;
 HFONT g_ui_font = nullptr;
 WNDPROC g_edit_proc = nullptr;
+WNDPROC g_parts_proc = nullptr;
+bool g_parts_suppress_click = false;
 HBRUSH g_panel_brush = nullptr;
 HBRUSH g_edit_brush = nullptr;
 HWND g_options_window = nullptr;
@@ -135,6 +143,8 @@ HWND g_options_size = nullptr;
 HWND g_options_hardness = nullptr;
 HWND g_shape_round = nullptr;
 HWND g_shape_square = nullptr;
+HWND g_options_color = nullptr;
+HWND g_options_close = nullptr;
 
 constexpr int ID_TEMPLATES = 1001;
 constexpr int ID_PARTS = 1002;
@@ -161,6 +171,10 @@ constexpr int ID_SHAPE_ROUND = 1022;
 constexpr int ID_SHAPE_SQUARE = 1023;
 constexpr int ID_HARDNESS = 1024;
 constexpr int ID_BRUSH_SIZE = 1025;
+constexpr int ID_OPTIONS_SIZE = 1026;
+constexpr int ID_OPTIONS_COLOR = 1027;
+constexpr int ID_PART_UP = 1028;
+constexpr int ID_PART_DOWN = 1029;
 
 constexpr size_t MAX_HISTORY = 400;
 
@@ -177,6 +191,10 @@ void choose_brush_color(HWND owner);
 void undo_image();
 void redo_image();
 void subclass_edit(HWND hwnd);
+void populate_dev_fields();
+void close_tool_panel();
+void set_status(const std::wstring& message);
+void layout_tool_panel_controls(HWND hwnd);
 
 std::wstring widen(const std::string& text) {
     if (text.empty()) {
@@ -266,6 +284,47 @@ LRESULT CALLBACK edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         }
     }
     return CallWindowProcW(g_edit_proc, hwnd, message, wparam, lparam);
+}
+
+void close_tool_panel() {
+    if (!g_app.tool_panel_open) {
+        return;
+    }
+    g_app.tool_panel_open = false;
+    HWND controls[] = {g_options_size, g_options_hardness, g_shape_round, g_shape_square, g_options_color, g_options_close};
+    for (HWND control : controls) {
+        if (control) {
+            ShowWindow(control, SW_HIDE);
+        }
+    }
+    InvalidateRect(g_main, nullptr, FALSE);
+    set_status(L"Painel da ferramenta fechado.");
+}
+
+LRESULT CALLBACK parts_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_LBUTTONDOWN) {
+        close_tool_panel();
+        DWORD hit = static_cast<DWORD>(SendMessageW(hwnd, LB_ITEMFROMPOINT, 0, lparam));
+        int index = LOWORD(hit);
+        bool outside = HIWORD(hit) != 0;
+        if (!outside && index == g_app.selected_part) {
+            g_parts_suppress_click = true;
+            g_app.selected_part = -1;
+            SendMessageW(hwnd, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+            populate_dev_fields();
+            InvalidateRect(hwnd, nullptr, TRUE);
+            InvalidateRect(g_main, nullptr, FALSE);
+            set_status(L"Nenhuma parte selecionada. Editando a imagem inteira.");
+            return 0;
+        }
+    }
+    if (message == WM_LBUTTONUP && g_parts_suppress_click) {
+        g_parts_suppress_click = false;
+        SendMessageW(hwnd, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+    }
+    return CallWindowProcW(g_parts_proc, hwnd, message, wparam, lparam);
 }
 
 int get_control_int(HWND hwnd, int fallback) {
@@ -630,6 +689,13 @@ void load_image(const fs::path& path, bool force = false) {
     g_app.zoom = 1.0;
     g_app.pan_x = 0;
     g_app.pan_y = 0;
+    if (TextureTemplate* texture = current_template(); texture && texture->width > 0 && texture->height > 0) {
+        g_app.part_scale_x = static_cast<double>(g_app.image->GetWidth()) / texture->width;
+        g_app.part_scale_y = static_cast<double>(g_app.image->GetHeight()) / texture->height;
+    } else {
+        g_app.part_scale_x = 1.0;
+        g_app.part_scale_y = 1.0;
+    }
     clear_history();
     std::wstring size = std::to_wstring(g_app.image->GetWidth()) + L"x" + std::to_wstring(g_app.image->GetHeight());
     set_status(L"Imagem carregada: " + path.filename().wstring() + L" (" + size + L")");
@@ -703,12 +769,34 @@ void rebuild_parts() {
         std::wstring item = widen(part.id + " - " + part.label);
         SendMessageW(g_parts, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
     }
-    g_app.selected_part = texture->parts.empty() ? -1 : std::clamp(g_app.selected_part, 0, static_cast<int>(texture->parts.size()) - 1);
+    if (texture->parts.empty()) {
+        g_app.selected_part = -1;
+    } else if (g_app.selected_part >= static_cast<int>(texture->parts.size())) {
+        g_app.selected_part = static_cast<int>(texture->parts.size()) - 1;
+    }
     if (g_app.selected_part >= 0) {
         SendMessageW(g_parts, LB_SETCURSEL, g_app.selected_part, 0);
+    } else {
+        SendMessageW(g_parts, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
     }
     populate_dev_fields();
     InvalidateRect(g_main, nullptr, FALSE);
+}
+
+void move_selected_part(int direction) {
+    TextureTemplate* texture = current_template();
+    if (!texture || g_app.selected_part < 0 || g_app.selected_part >= static_cast<int>(texture->parts.size())) {
+        set_status(L"Selecione uma parte para reordenar.");
+        return;
+    }
+    int next = g_app.selected_part + direction;
+    if (next < 0 || next >= static_cast<int>(texture->parts.size())) {
+        return;
+    }
+    std::swap(texture->parts[g_app.selected_part], texture->parts[next]);
+    g_app.selected_part = next;
+    rebuild_parts();
+    set_status(L"Ordem da parte alterada. Clique em Salvar JSON para gravar.");
 }
 
 void rebuild_templates() {
@@ -803,12 +891,14 @@ void layout(HWND hwnd) {
     MoveWindow(g_open, 12, 4, 96, 26, TRUE);
     MoveWindow(g_save_png, 114, 4, 104, 26, TRUE);
     MoveWindow(g_reset, 224, 4, 128, 26, TRUE);
-    MoveWindow(g_options, 362, 4, 96, 26, TRUE);
-    MoveWindow(g_zoom_out, width - 318, 4, 34, 26, TRUE);
-    MoveWindow(g_zoom_label, width - 278, 7, 58, 22, TRUE);
-    MoveWindow(g_zoom_in, width - 214, 4, 34, 26, TRUE);
-    MoveWindow(g_zoom_fit, width - 174, 4, 48, 26, TRUE);
-    MoveWindow(g_dev_check, width - 116, 4, 104, 26, TRUE);
+    if (g_options) {
+        ShowWindow(g_options, SW_HIDE);
+    }
+    MoveWindow(g_dev_check, width - 126, 4, 116, 26, TRUE);
+    MoveWindow(g_zoom_fit, width - 184, 4, 48, 26, TRUE);
+    MoveWindow(g_zoom_in, width - 226, 4, 34, 26, TRUE);
+    MoveWindow(g_zoom_label, width - 292, 7, 58, 22, TRUE);
+    MoveWindow(g_zoom_out, width - 334, 4, 34, 26, TRUE);
 
     MoveWindow(g_select_tool, 9, content_top + 10, 40, 36, TRUE);
     MoveWindow(g_pencil_tool, 9, content_top + 54, 40, 36, TRUE);
@@ -838,7 +928,7 @@ void layout(HWND hwnd) {
     MoveWindow(g_tool_preview, right_x, y, right_panel_w - 24, 136, TRUE);
     y += 154;
 
-    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_apply, g_new_part, g_delete_part, g_save};
+    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_apply, g_new_part, g_delete_part, g_part_up, g_part_down, g_save};
     for (HWND child : children) {
         ShowWindow(child, g_app.dev_mode ? SW_SHOW : SW_HIDE);
     }
@@ -862,14 +952,17 @@ void layout(HWND hwnd) {
         place(labels[4], g_w);
         place(labels[5], g_h);
         MoveWindow(g_apply, right_x, y + UI_GAP, right_panel_w - 24, 30, TRUE);
-        MoveWindow(g_new_part, right_x, y + 46, right_panel_w - 24, 30, TRUE);
-        MoveWindow(g_delete_part, right_x, y + 82, right_panel_w - 24, 30, TRUE);
+        MoveWindow(g_new_part, right_x, y + 46, (right_panel_w - 34) / 2, 30, TRUE);
+        MoveWindow(g_delete_part, right_x + (right_panel_w - 34) / 2 + 10, y + 46, (right_panel_w - 34) / 2, 30, TRUE);
+        MoveWindow(g_part_up, right_x, y + 82, (right_panel_w - 34) / 2, 30, TRUE);
+        MoveWindow(g_part_down, right_x + (right_panel_w - 34) / 2 + 10, y + 82, (right_panel_w - 34) / 2, 30, TRUE);
         MoveWindow(g_save, right_x, y + 128, right_panel_w - 24, 34, TRUE);
     } else {
         for (int id = 2001; id <= 2006; ++id) {
             ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
         }
     }
+    layout_tool_panel_controls(hwnd);
     InvalidateRect(hwnd, nullptr, TRUE);
 }
 
@@ -975,11 +1068,23 @@ Rect part_to_screen(const Part& part) {
     }
     double sx = static_cast<double>(g_app.image_rect.Width) / image->GetWidth();
     double sy = static_cast<double>(g_app.image_rect.Height) / image->GetHeight();
+    int px = static_cast<int>(std::round(part.x * g_app.part_scale_x));
+    int py = static_cast<int>(std::round(part.y * g_app.part_scale_y));
+    int pw = std::max(1, static_cast<int>(std::round(part.w * g_app.part_scale_x)));
+    int ph = std::max(1, static_cast<int>(std::round(part.h * g_app.part_scale_y)));
     return Rect(
-        g_app.image_rect.X + static_cast<int>(part.x * sx),
-        g_app.image_rect.Y + static_cast<int>(part.y * sy),
-        std::max(1, static_cast<int>(part.w * sx)),
-        std::max(1, static_cast<int>(part.h * sy)));
+        g_app.image_rect.X + static_cast<int>(px * sx),
+        g_app.image_rect.Y + static_cast<int>(py * sy),
+        std::max(1, static_cast<int>(pw * sx)),
+        std::max(1, static_cast<int>(ph * sy)));
+}
+
+Rect part_to_source_rect(const Part& part) {
+    return Rect(
+        std::max(0, static_cast<int>(std::round(part.x * g_app.part_scale_x))),
+        std::max(0, static_cast<int>(std::round(part.y * g_app.part_scale_y))),
+        std::max(1, static_cast<int>(std::round(part.w * g_app.part_scale_x))),
+        std::max(1, static_cast<int>(std::round(part.h * g_app.part_scale_y))));
 }
 
 Rect image_rect_to_screen_rect(int x, int y, int w, int h) {
@@ -1165,6 +1270,71 @@ void draw_panel_shell(Graphics& g, const Rect& rect, Color fill, Color border) {
     g.DrawLine(&top_light, rect.X + 1, rect.Y + 1, rect.X + rect.Width - 2, rect.Y + 1);
 }
 
+void draw_tool_options_panel(Graphics& g) {
+    if (!g_app.tool_panel_open || g_app.tool_panel_rect.Width <= 0 || g_app.tool_panel_rect.Height <= 0) {
+        return;
+    }
+
+    Rect panel = g_app.tool_panel_rect;
+    SolidBrush shadow(Color(95, 0, 0, 0));
+    g.FillRectangle(&shadow, panel.X + 8, panel.Y + 8, panel.Width, panel.Height);
+
+    Gdiplus::GraphicsPath panel_path;
+    int d = 16;
+    panel_path.AddArc(panel.X, panel.Y, d, d, 180, 90);
+    panel_path.AddArc(panel.X + panel.Width - d, panel.Y, d, d, 270, 90);
+    panel_path.AddArc(panel.X + panel.Width - d, panel.Y + panel.Height - d, d, d, 0, 90);
+    panel_path.AddArc(panel.X, panel.Y + panel.Height - d, d, d, 90, 90);
+    panel_path.CloseFigure();
+    SolidBrush panel_fill(Color(248, 34, 36, 40));
+    Pen panel_border(Color(128, 120, 128, 142), 1.0f);
+    g.FillPath(&panel_fill, &panel_path);
+    g.DrawPath(&panel_border, &panel_path);
+
+    Gdiplus::FontFamily family(L"Segoe UI");
+    Gdiplus::Font title_font(&family, 14.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    Gdiplus::Font label_font(&family, 12.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    SolidBrush title_brush(Color(255, 245, 247, 250));
+    SolidBrush label_brush(Color(255, 215, 219, 226));
+    SolidBrush muted(Color(255, 176, 182, 193));
+
+    Rect preview(panel.X + 18, panel.Y + 18, 98, 98);
+    SolidBrush preview_bg(Color(255, 50, 53, 58));
+    g.FillRectangle(&preview_bg, preview);
+
+    Pen guide(Color(255, 130, 134, 140), 1.0f);
+    int cx = preview.X + preview.Width / 2;
+    int cy = preview.Y + preview.Height / 2;
+    g.DrawEllipse(&guide, preview.X + 9, preview.Y + 9, preview.Width - 18, preview.Height - 18);
+    g.DrawLine(&guide, preview.X + 18, cy, preview.X + preview.Width - 18, cy);
+    g.DrawLine(&guide, cx, preview.Y + 18, cx, preview.Y + preview.Height - 18);
+
+    int preview_size = clamp_int(g_app.brush_size, 4, 34);
+    SolidBrush stamp(g_app.tool == Tool::Eraser ? Color(255, 210, 214, 220) : Color(255, GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color)));
+    if (g_app.brush_shape == BrushShape::Square) {
+        g.FillRectangle(&stamp, cx - preview_size / 2, cy - preview_size / 2, preview_size, preview_size);
+    } else {
+        g.FillEllipse(&stamp, cx - preview_size / 2, cy - preview_size / 2, preview_size, preview_size);
+    }
+
+    std::wstring title = std::wstring(g_app.tool == Tool::Eraser ? L"Borracha" : L"Lapis") + L" profissional";
+    g.DrawString(title.c_str(), -1, &title_font, Gdiplus::PointF(static_cast<float>(panel.X + 132), static_cast<float>(panel.Y + 20)), &title_brush);
+    g.DrawString(L"Tamanho:", -1, &label_font, Gdiplus::PointF(static_cast<float>(panel.X + 132), static_cast<float>(panel.Y + 54)), &label_brush);
+    g.DrawString(L"Dureza:", -1, &label_font, Gdiplus::PointF(static_cast<float>(panel.X + 132), static_cast<float>(panel.Y + 100)), &label_brush);
+    g.DrawString(L"Formato", -1, &label_font, Gdiplus::PointF(static_cast<float>(panel.X + 18), static_cast<float>(panel.Y + 136)), &muted);
+
+    Pen slider(Color(255, 92, 96, 104), 2.0f);
+    Pen active(Color(255, 0, 158, 205), 3.0f);
+    int size_y = panel.Y + 72;
+    int hard_y = panel.Y + 118;
+    int slider_left = panel.X + 132;
+    int slider_right = panel.X + 300;
+    g.DrawLine(&slider, slider_left, size_y, slider_right, size_y);
+    g.DrawLine(&slider, slider_left, hard_y, slider_right, hard_y);
+    g.DrawLine(&active, slider_left, size_y, slider_left + clamp_int(g_app.brush_size, 1, 128) * 168 / 128, size_y);
+    g.DrawLine(&active, slider_left, hard_y, slider_left + clamp_int(g_app.brush_hardness, 1, 100) * 168 / 100, hard_y);
+}
+
 void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repaint) {
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
@@ -1213,6 +1383,24 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
     draw_section_label(g, L"Partes", L"Areas editaveis", UI_TOOLBAR_W + 16, UI_MENU_H + UI_OPTIONS_H + 185, UI_LEFT_PANEL_W - 32);
     draw_section_label(g, g_app.dev_mode ? L"Modo-dev" : L"Ferramenta", g_app.dev_mode ? L"IDs, JSON e preview" : L"Preview e atalhos", client.right - UI_RIGHT_PANEL_W + 16, UI_MENU_H + UI_OPTIONS_H + 8, UI_RIGHT_PANEL_W - 32);
 
+    Rect agent(client.right - UI_RIGHT_PANEL_W + 16, client.bottom - UI_STATUS_H - 104, UI_RIGHT_PANEL_W - 32, 82);
+    Gdiplus::GraphicsPath agent_path;
+    int ad = 12;
+    agent_path.AddArc(agent.X, agent.Y, ad, ad, 180, 90);
+    agent_path.AddArc(agent.X + agent.Width - ad, agent.Y, ad, ad, 270, 90);
+    agent_path.AddArc(agent.X + agent.Width - ad, agent.Y + agent.Height - ad, ad, ad, 0, 90);
+    agent_path.AddArc(agent.X, agent.Y + agent.Height - ad, ad, ad, 90, 90);
+    agent_path.CloseFigure();
+    SolidBrush agent_fill(Color(145, 18, 22, 30));
+    Pen agent_border(Color(58, 0, 158, 205), 1.0f);
+    g.FillPath(&agent_fill, &agent_path);
+    g.DrawPath(&agent_border, &agent_path);
+    Gdiplus::Font agent_title(&brand_family, 12.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+    Gdiplus::Font agent_text_font(&brand_family, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    g.DrawString(L"Agente IA", -1, &agent_title, Gdiplus::PointF(static_cast<float>(agent.X + 12), static_cast<float>(agent.Y + 12)), &brand);
+    Gdiplus::StringFormat agent_format;
+    g.DrawString(L"Cantinho reservado para o assistente do editor de foto.", -1, &agent_text_font, Gdiplus::RectF(static_cast<float>(agent.X + 12), static_cast<float>(agent.Y + 34), static_cast<float>(agent.Width - 24), 38.0f), &agent_format, &muted);
+
     Rect canvas = canvas_rect(hwnd);
     SolidBrush canvas_brush(Color(255, 9, 11, 15));
     g.FillRectangle(&canvas_brush, canvas);
@@ -1254,15 +1442,15 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
 
             int max_preview_w = std::max(96, canvas.Width / 3);
             int max_preview_h = std::max(96, canvas.Height / 3);
-            int zoom = std::max(1, std::min({8, max_preview_w / std::max(1, part->w), max_preview_h / std::max(1, part->h)}));
-            int preview_w = std::max(1, part->w * zoom);
-            int preview_h = std::max(1, part->h * zoom);
+            Rect src = part_to_source_rect(*part);
+            int zoom = std::max(1, std::min({8, max_preview_w / std::max(1, src.Width), max_preview_h / std::max(1, src.Height)}));
+            int preview_w = std::max(1, src.Width * zoom);
+            int preview_h = std::max(1, src.Height * zoom);
             Rect preview(canvas.X + canvas.Width - preview_w - 18, canvas.Y + canvas.Height - preview_h - 18, preview_w, preview_h);
             g_app.preview_rect = preview;
             SolidBrush preview_bg(Color(230, 20, 25, 33));
             g.FillRectangle(&preview_bg, preview);
             g.DrawRectangle(&cyan, preview);
-            Rect src(part->x, part->y, part->w, part->h);
             g.DrawImage(g_app.image.get(), preview, src.X, src.Y, src.Width, src.Height, Gdiplus::UnitPixel);
         } else {
             g_app.preview_rect = Rect();
@@ -1327,6 +1515,8 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
     Gdiplus::FontFamily family(L"Segoe UI");
     Gdiplus::Font font(&family, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
     g.DrawString(hud_label.c_str(), -1, &font, Gdiplus::PointF(static_cast<float>(hud.X + 8), static_cast<float>(hud.Y + 6)), &hud_text);
+
+    draw_tool_options_panel(g);
 }
 
 void paint(HWND hwnd) {
@@ -1367,7 +1557,8 @@ void select_part_from_point(int x, int y) {
     int iy = static_cast<int>((y - g_app.image_rect.Y) * sy);
     for (size_t i = 0; i < texture->parts.size(); ++i) {
         const Part& part = texture->parts[i];
-        if (ix >= part.x && ix <= part.x + part.w && iy >= part.y && iy <= part.y + part.h) {
+        Rect src = part_to_source_rect(part);
+        if (ix >= src.X && ix <= src.X + src.Width && iy >= src.Y && iy <= src.Y + src.Height) {
             g_app.selected_part = static_cast<int>(i);
             SendMessageW(g_parts, LB_SETCURSEL, g_app.selected_part, 0);
             populate_dev_fields();
@@ -1470,6 +1661,7 @@ void draw_owner_button(const DRAWITEMSTRUCT* item) {
             }
             if (item->hwndItem == g_parts && g_app.image && item->itemID < static_cast<UINT>(current_template() ? current_template()->parts.size() : 0)) {
                 const Part& part = current_template()->parts[item->itemID];
+                Rect src = part_to_source_rect(part);
                 RECT thumb{r.left + 6, r.top + 4, r.left + 34, r.bottom - 4};
                 HBRUSH thumb_bg = CreateSolidBrush(RGB(12, 14, 18));
                 FillRect(item->hDC, &thumb, thumb_bg);
@@ -1479,7 +1671,7 @@ void draw_owner_button(const DRAWITEMSTRUCT* item) {
                 int thumb_w = std::max(1, static_cast<int>(thumb.right - thumb.left - 4));
                 int thumb_h = std::max(1, static_cast<int>(thumb.bottom - thumb.top - 4));
                 Rect dest(thumb.left + 2, thumb.top + 2, thumb_w, thumb_h);
-                thumb_g.DrawImage(g_app.image.get(), dest, part.x, part.y, part.w, part.h, Gdiplus::UnitPixel);
+                thumb_g.DrawImage(g_app.image.get(), dest, src.X, src.Y, src.Width, src.Height, Gdiplus::UnitPixel);
                 HPEN thumb_border = CreatePen(PS_SOLID, 1, selected ? RGB(255, 255, 255) : RGB(80, 92, 110));
                 HGDIOBJ old_pen = SelectObject(item->hDC, thumb_border);
                 HGDIOBJ old_brush = SelectObject(item->hDC, GetStockObject(NULL_BRUSH));
@@ -1700,6 +1892,29 @@ void sync_options_controls() {
     invalidate_tool_ui();
 }
 
+void layout_tool_panel_controls(HWND hwnd) {
+    HWND controls[] = {g_options_size, g_options_hardness, g_shape_round, g_shape_square, g_options_color, g_options_close};
+    int show = g_app.tool_panel_open ? SW_SHOW : SW_HIDE;
+    for (HWND control : controls) {
+        if (control) {
+            ShowWindow(control, show);
+        }
+    }
+    if (!g_app.tool_panel_open || g_app.tool_panel_rect.Width <= 0) {
+        return;
+    }
+
+    Rect panel = g_app.tool_panel_rect;
+    MoveWindow(g_options_size, panel.X + 246, panel.Y + 36, 58, 26, TRUE);
+    MoveWindow(g_options_hardness, panel.X + 246, panel.Y + 82, 58, 26, TRUE);
+    MoveWindow(g_options_close, panel.X + panel.Width - 36, panel.Y + 10, 24, 24, TRUE);
+    MoveWindow(g_shape_round, panel.X + 18, panel.Y + 158, 92, 30, TRUE);
+    MoveWindow(g_shape_square, panel.X + 118, panel.Y + 158, 98, 30, TRUE);
+    MoveWindow(g_options_color, panel.X + 226, panel.Y + 158, 78, 30, TRUE);
+    sync_options_controls();
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 void draw_options_panel(HWND hwnd, HDC dc) {
     RECT client{};
     GetClientRect(hwnd, &client);
@@ -1869,32 +2084,19 @@ LRESULT CALLBACK options_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
 }
 
 void show_options_window(POINT screen_pos = POINT{-1, -1}) {
-    if (g_options_window && IsWindow(g_options_window)) {
-        sync_options_controls();
-        if (screen_pos.x >= 0 && screen_pos.y >= 0) {
-            SetWindowPos(g_options_window, HWND_TOPMOST, screen_pos.x, screen_pos.y, 0, 0, SWP_NOSIZE);
-        }
-        SetForegroundWindow(g_options_window);
-        return;
-    }
-    g_options_window = nullptr;
-    WNDCLASSW wc = {};
-    wc.lpfnWndProc = options_proc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = g_panel_brush;
-    wc.lpszClassName = L"TeeworldsTextureEditorOptions";
-    RegisterClassW(&wc);
-    int x = screen_pos.x >= 0 ? screen_pos.x : CW_USEDEFAULT;
-    int y = screen_pos.y >= 0 ? screen_pos.y : CW_USEDEFAULT;
-    g_options_window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, wc.lpszClassName, L"Opcoes - Teeworlds Texture Editor", WS_POPUP, x, y, 410, 210, g_main, nullptr, GetModuleHandleW(nullptr), nullptr);
-    if (!g_options_window) {
-        set_status(L"Falha ao abrir painel de opcoes. Erro: " + std::to_wstring(GetLastError()));
-        return;
-    }
-    ShowWindow(g_options_window, SW_SHOW);
-    UpdateWindow(g_options_window);
-    SetForegroundWindow(g_options_window);
+    RECT client{};
+    GetClientRect(g_main, &client);
+    Rect canvas = canvas_rect(g_main);
+    constexpr int panel_w = 410;
+    constexpr int panel_h = 210;
+    int x = screen_pos.x >= 0 ? screen_pos.x : canvas.X + 340;
+    int y = screen_pos.y >= 0 ? screen_pos.y : canvas.Y + 260;
+    x = clamp_int(x, canvas.X + 12, std::max(canvas.X + 12, static_cast<int>(client.right) - panel_w - UI_RIGHT_PANEL_W - 20));
+    y = clamp_int(y, canvas.Y + 12, std::max(canvas.Y + 12, static_cast<int>(client.bottom) - UI_STATUS_H - panel_h - 12));
+    g_app.tool_panel_open = true;
+    g_app.tool_panel_rect = Rect(x, y, panel_w, panel_h);
+    layout_tool_panel_controls(g_main);
+    set_status(L"Painel da ferramenta aberto dentro do editor.");
 }
 
 void choose_brush_color(HWND owner) {
@@ -1965,11 +2167,21 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_apply = make_button(hwnd, L"Aplicar parte", BS_PUSHBUTTON, ID_APPLY);
         g_new_part = make_button(hwnd, L"Nova parte", BS_PUSHBUTTON, ID_NEW);
         g_delete_part = make_button(hwnd, L"Remover parte", BS_PUSHBUTTON, ID_DELETE);
+        g_part_up = make_button(hwnd, L"Subir", BS_PUSHBUTTON, ID_PART_UP);
+        g_part_down = make_button(hwnd, L"Descer", BS_PUSHBUTTON, ID_PART_DOWN);
         g_save = make_button(hwnd, L"Salvar JSON", BS_PUSHBUTTON, ID_SAVE);
-        HWND edits[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_brush_size};
+        g_options_size = make_child(hwnd, L"EDIT", L"8", WS_BORDER | ES_NUMBER, ID_OPTIONS_SIZE);
+        g_options_hardness = make_child(hwnd, L"EDIT", L"100", WS_BORDER | ES_NUMBER, ID_HARDNESS);
+        g_shape_round = make_button(hwnd, L"Redondo", BS_AUTORADIOBUTTON, ID_SHAPE_ROUND);
+        g_shape_square = make_button(hwnd, L"Quadrado", BS_AUTORADIOBUTTON, ID_SHAPE_SQUARE);
+        g_options_color = make_button(hwnd, L"Cor", BS_PUSHBUTTON, ID_OPTIONS_COLOR);
+        g_options_close = make_button(hwnd, L"X", BS_PUSHBUTTON, ID_OPTIONS_CLOSE);
+        HWND edits[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_brush_size, g_options_size, g_options_hardness};
         for (HWND edit : edits) {
             subclass_edit(edit);
         }
+        g_parts_proc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(g_parts, GWLP_WNDPROC));
+        SetWindowLongPtrW(g_parts, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(parts_list_proc));
         set_tool(Tool::Select);
         update_zoom_label();
 
@@ -2000,6 +2212,17 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     }
     case WM_LBUTTONDOWN:
         SetFocus(hwnd);
+        if (g_app.tool_panel_open) {
+            int mx = GET_X_LPARAM(lparam);
+            int my = GET_Y_LPARAM(lparam);
+            Rect panel = g_app.tool_panel_rect;
+            bool inside_panel = mx >= panel.X && my >= panel.Y && mx <= panel.X + panel.Width && my <= panel.Y + panel.Height;
+            if (!inside_panel) {
+                close_tool_panel();
+            } else {
+                return 0;
+            }
+        }
         if (g_app.tool == Tool::Select) {
             select_part_from_point(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
         } else {
@@ -2024,7 +2247,6 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             SetCapture(hwnd);
         } else {
             POINT screen_pos{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-            ClientToScreen(hwnd, &screen_pos);
             show_options_window(screen_pos);
         }
         return 0;
@@ -2129,8 +2351,41 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 invalidate_tool_ui();
             }
             return 0;
+        case ID_OPTIONS_SIZE:
+            if (HIWORD(wparam) == EN_CHANGE) {
+                g_app.brush_size = clamp_int(get_control_int(g_options_size, g_app.brush_size), 1, 128);
+                set_control_int_if_changed(g_brush_size, g_app.brush_size);
+                invalidate_tool_ui();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        case ID_HARDNESS:
+            if (HIWORD(wparam) == EN_CHANGE) {
+                g_app.brush_hardness = clamp_int(get_control_int(g_options_hardness, g_app.brush_hardness), 1, 100);
+                invalidate_tool_ui();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        case ID_SHAPE_ROUND:
+            g_app.brush_shape = BrushShape::Round;
+            sync_options_controls();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case ID_SHAPE_SQUARE:
+            g_app.brush_shape = BrushShape::Square;
+            sync_options_controls();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case ID_OPTIONS_COLOR:
+            choose_brush_color(hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case ID_OPTIONS_CLOSE:
+            close_tool_panel();
+            return 0;
         case ID_TEMPLATES:
             if (HIWORD(wparam) == LBN_SELCHANGE) {
+                close_tool_panel();
                 int next_template = static_cast<int>(SendMessageW(g_templates, LB_GETCURSEL, 0, 0));
                 if (next_template == g_app.selected_template) {
                     return 0;
@@ -2143,6 +2398,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             return 0;
         case ID_PARTS:
             if (HIWORD(wparam) == LBN_SELCHANGE) {
+                close_tool_panel();
                 g_app.selected_part = static_cast<int>(SendMessageW(g_parts, LB_GETCURSEL, 0, 0));
                 populate_dev_fields();
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -2158,12 +2414,15 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             load_default_image(true);
             return 0;
         case ID_TOOL_SELECT:
+            close_tool_panel();
             set_tool(Tool::Select);
             return 0;
         case ID_TOOL_PENCIL:
+            close_tool_panel();
             set_tool(Tool::Pencil);
             return 0;
         case ID_TOOL_ERASER:
+            close_tool_panel();
             set_tool(Tool::Eraser);
             return 0;
         case ID_COLOR_PICK:
@@ -2179,7 +2438,6 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             fit_zoom();
             return 0;
         case ID_OPTIONS:
-            show_options_window();
             return 0;
         case ID_DEV:
             g_app.dev_mode = !g_app.dev_mode;
@@ -2202,6 +2460,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             return 0;
         case ID_DELETE:
             delete_part();
+            return 0;
+        case ID_PART_UP:
+            move_selected_part(-1);
+            return 0;
+        case ID_PART_DOWN:
+            move_selected_part(1);
             return 0;
         case ID_SAVE:
             save_templates();
