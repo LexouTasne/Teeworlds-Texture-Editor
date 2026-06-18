@@ -1,32 +1,34 @@
 # IA-TRAIN
 
-Pasta local usada pelo agente `Genus` para guardar ensino, avaliações e simulações do editor.
+Pasta local usada pelo agente `Genus` para guardar ensino, avaliacoes e simulacoes do editor.
 
-O app grava dados em JSONL e esses arquivos ficam ignorados pelo Git para não publicar pedidos do usuário por acidente.
+O app grava dados em JSONL e esses arquivos ficam ignorados pelo Git para nao publicar pedidos do usuario por acidente.
 
-## Fluxo novo do Genus
+## Fluxo do Genus
 
-Agora o Genus trabalha com um fluxo único:
-
-1. O usuário escreve o pedido em português ou inglês.
+1. O usuario escreve o pedido em portugues ou ingles.
 2. Clica em `Enviar`.
-3. O Genus tenta executar usando treino salvo ou parser PT/EN.
-4. Se não souber fazer, ele abre o modo de ensino com uma receita `agent-*` editável.
-5. O usuário ajusta os agentes e clica em `Salvar ensino`.
-6. Depois de executar, o usuário pode avaliar com `nota 8`, `rate 8`, etc.
+3. O Genus tenta executar usando treino salvo, IA externa e parser PT/EN.
+4. Se nao souber fazer com seguranca, ele abre o modo de ensino com uma receita `agent-*` editavel.
+5. O usuario ajusta os agentes e clica em `Salvar ensino`.
+6. Depois de executar, o usuario avalia com `nota 8 obs acertou a cor, errou a sombra` ou `rate 8 comment good target`.
 
 ## Arquivos locais
 
-- `genus-training.jsonl`: receitas ensinadas pelo usuário.
-- `genus-ratings.jsonl`: notas de 0 a 10 para ações executadas.
-- `genus-simulations.jsonl`: simulações geradas localmente para treino/teste inicial.
+- `genus-training.jsonl`: receitas ensinadas pelo usuario.
+- `genus-ratings.jsonl`: notas de 0 a 10 e observacoes para acoes executadas.
+- `genus-simulations.jsonl`: simulacoes locais usadas como exemplos fracos de treino.
 
 ## Agentes aceitos
 
 ```text
 agent-select-template gameskin
-agent-select-part
 agent-select-part body
+agent-auto-select-part weapon
+agent-select-current-part
+agent-select-all
+agent-select-current-layer
+agent-layer-base
 agent-select-ferramenta pencil
 agent-select-ferramenta brush
 agent-select-ferramenta eraser
@@ -34,8 +36,11 @@ agent-select-ferramenta bucket
 agent-select-ferramenta select
 agent-select-ferramenta crop
 agent-fill
+agent-fill-selection
 agent-pintar
+agent-paint-selection
 agent-crop-layer
+clear
 agent-rate
 ```
 
@@ -60,14 +65,25 @@ source-color yellow
 fill
 clear
 crop
+nota 8 obs fez certo a selecao, mas errou a cor
 ```
 
 ## Exemplos PT/EN
 
+### Preencher arma/weapon com azul
+
+```text
+agent-auto-select-part weapon
+agent-select-ferramenta bucket
+color #267EFF
+agent-fill
+agent-rate
+```
+
 ### Recolorir amarelo para azul
 
 ```text
-agent-select-part
+agent-select-current-part
 agent-select-ferramenta pencil
 source-color yellow
 color blue
@@ -79,17 +95,19 @@ agent-rate
 Pedidos que o parser entende:
 
 ```text
-pinte tudo que é amarelo para azul com confiança 60
+preenche a part weapon com azul
+fill the weapon part with blue
+pinte tudo que e amarelo para azul com confianca 60
 paint every yellow part blue with confidence 60
 ```
 
-### Recortar uma part para camada movível
+### Recortar uma part para camada movel
 
 ```text
-agent-select-part
+agent-select-current-part
 agent-select-ferramenta crop
 agent-crop-layer
 agent-rate
 ```
 
-Depois do recorte, use a ferramenta `Selecionar` e arraste a camada. Ao salvar PNG, a camada é mesclada automaticamente.
+Depois do recorte, use a ferramenta `Selecionar` e arraste a camada. Ao salvar PNG, a camada e mesclada automaticamente.

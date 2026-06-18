@@ -24,7 +24,21 @@
         { "id": "Aim_Laser", "label": "Aim Laser", "x": 0, "y": 384, "w": 64, "h": 64 },
         { "id": "Bullet_Rocket", "label": "Bullet Rocket", "x": 320, "y": 256, "w": 64, "h": 64 },
         { "id": "Bullet_Shotgun", "label": "Bullet Shotgun", "x": 320, "y": 192, "w": 64, "h": 64 },
-        { "id": "Bullet_Pistol", "label": "Bullet Pistol", "x": 192, "y": 128, "w": 64, "h": 64 }
+        { "id": "Bullet_Pistol", "label": "Bullet Pistol", "x": 192, "y": 128, "w": 64, "h": 64 },
+        { "id": "Effect_1", "label": "Effect 1", "x": 192, "y": 0, "w": 32, "h": 32 },
+        { "id": "Effect_2", "label": "Effect 2", "x": 192, "y": 32, "w": 32, "h": 32 },
+        { "id": "Effect_3", "label": "Effect 3", "x": 224, "y": 0, "w": 32, "h": 32 },
+        { "id": "Effect_4", "label": "Effect 4", "x": 224, "y": 32, "w": 32, "h": 32 },
+        { "id": "Effect_5", "label": "Effect 5", "x": 256, "y": 0, "w": 32, "h": 32 },
+        { "id": "Effect_6", "label": "Effect 6", "x": 256, "y": 32, "w": 32, "h": 32 },
+        { "id": "Effect_7", "label": "Effect 7", "x": 288, "y": 0, "w": 64, "h": 64 },
+        { "id": "Effect_8", "label": "Effect 8", "x": 352, "y": 0, "w": 64, "h": 64 },
+        { "id": "Effect_9", "label": "Effect 9", "x": 416, "y": 0, "w": 64, "h": 64 },
+        { "id": "Effect_10", "label": "Effect 10", "x": 480, "y": 0, "w": 64, "h": 64 },
+        { "id": "Effect_11", "label": "Effect 11", "x": 544, "y": 0, "w": 64, "h": 64 },
+        { "id": "Effect_12", "label": "Effect 12", "x": 608, "y": 0, "w": 64, "h": 64 },
+        { "id": "Health_Full", "label": "Health Full", "x": 672, "y": 0, "w": 64, "h": 64 },
+        { "id": "Health_no_Full", "label": "Health no full", "x": 736, "y": 0, "w": 64, "h": 64 }
       ]
     },
     {

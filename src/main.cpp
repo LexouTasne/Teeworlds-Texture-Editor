@@ -227,7 +227,7 @@ constexpr int ID_AI_STEPS = 2102;
 constexpr int ID_AI_RUN = 2103;
 
 constexpr size_t MAX_HISTORY = 400;
-constexpr UINT ACTIVE_FRAME_MS = 16;
+constexpr UINT ACTIVE_FRAME_MS = 8;
 constexpr UINT MINIMIZED_FRAME_MS = 33;
 
 constexpr int UI_MENU_H = 34;
@@ -375,7 +375,7 @@ LRESULT CALLBACK parts_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
             g_app.selected_part = -1;
             SendMessageW(hwnd, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
             populate_dev_fields();
-            InvalidateRect(hwnd, nullptr, TRUE);
+            InvalidateRect(hwnd, nullptr, FALSE);
             InvalidateRect(g_main, nullptr, FALSE);
             set_status(L"Nenhuma parte selecionada. Editando a imagem inteira.");
             return 0;
@@ -384,7 +384,7 @@ LRESULT CALLBACK parts_list_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
     if (message == WM_LBUTTONUP && g_parts_suppress_click) {
         g_parts_suppress_click = false;
         SendMessageW(hwnd, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
-        InvalidateRect(hwnd, nullptr, TRUE);
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
     return CallWindowProcW(g_parts_proc, hwnd, message, wparam, lparam);
@@ -1066,16 +1066,111 @@ int find_template_index_by_text(const std::string& text) {
     return -1;
 }
 
+bool normalized_has_word(const std::string& norm_text, const std::string& raw_word) {
+    std::string word = normalize_text(raw_word);
+    return (" " + norm_text + " ").find(" " + word + " ") != std::string::npos;
+}
+
+std::string part_identity(const Part& part) {
+    return normalize_text(part.id + " " + part.label);
+}
+
+bool is_weapon_part(const Part& part) {
+    std::string id = part_identity(part);
+    const char* weapons[] = {
+        "gun", "pistol", "shotgun", "grenade", "rocket", "laser",
+        "ninja", "sword", "hammer", "weapon", "arma"
+    };
+    for (const char* word : weapons) {
+        if (id.find(word) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool part_matches_alias(const Part& part, const std::string& norm_query) {
+    std::string id = part_identity(part);
+    auto query_has = [&](const char* word) {
+        return normalized_has_word(norm_query, word);
+    };
+    auto id_has = [&](const char* word) {
+        return id.find(normalize_text(word)) != std::string::npos;
+    };
+
+    if ((query_has("weapon") || query_has("weapons") || query_has("arma") || query_has("armas")) && is_weapon_part(part)) {
+        return true;
+    }
+    if ((query_has("pistol") || query_has("arma de mao")) && (id_has("gun") || id_has("pistol"))) {
+        return true;
+    }
+    if ((query_has("rocket") || query_has("bazooka") || query_has("lanca") || query_has("foguete")) && (id_has("grenade") || id_has("rocket"))) {
+        return true;
+    }
+    if ((query_has("rifle") || query_has("raio")) && id_has("laser")) {
+        return true;
+    }
+    if ((query_has("sword") || query_has("espada")) && id_has("ninja")) {
+        return true;
+    }
+    if ((query_has("feet") || query_has("foot") || query_has("pes") || query_has("pe")) && (id_has("foot") || id_has("feet"))) {
+        return true;
+    }
+    if ((query_has("olho") || query_has("olhos") || query_has("eye") || query_has("eyes")) && id_has("eye")) {
+        return true;
+    }
+    if ((query_has("gancho") || query_has("hook")) && id_has("hook")) {
+        return true;
+    }
+    if ((query_has("heart") || query_has("vida") || query_has("coracao")) && (id_has("heart") || id_has("love"))) {
+        return true;
+    }
+    if ((query_has("shield") || query_has("armor") || query_has("armadura") || query_has("escudo")) && (id_has("shield") || id_has("armor"))) {
+        return true;
+    }
+    return false;
+}
+
+bool query_mentions_current_part_alias(const std::string& norm_query) {
+    Part* selected = current_part();
+    if (!selected) {
+        return false;
+    }
+    return part_matches_alias(*selected, norm_query);
+}
+
 int find_part_index_by_text(const std::string& text) {
     TextureTemplate* texture = current_template();
     if (!texture) {
         return -1;
     }
     std::string norm = normalize_text(text);
+    if (norm.empty()) {
+        return -1;
+    }
+    if ((normalized_has_word(norm, "selected") || normalized_has_word(norm, "selecionada")
+        || normalized_has_word(norm, "selecionado") || normalized_has_word(norm, "atual")
+        || query_mentions_current_part_alias(norm))
+        && current_part()) {
+        return g_app.selected_part;
+    }
     for (size_t i = 0; i < texture->parts.size(); ++i) {
         const Part& part = texture->parts[i];
         if (norm.find(normalize_text(part.id)) != std::string::npos
             || norm.find(normalize_text(part.label)) != std::string::npos) {
+            return static_cast<int>(i);
+        }
+    }
+    if (normalized_has_word(norm, "weapon") || normalized_has_word(norm, "weapons") || normalized_has_word(norm, "arma") || normalized_has_word(norm, "armas")) {
+        for (size_t i = 0; i < texture->parts.size(); ++i) {
+            std::string id = part_identity(texture->parts[i]);
+            if (id.find("gun") != std::string::npos || id.find("pistol") != std::string::npos) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    for (size_t i = 0; i < texture->parts.size(); ++i) {
+        if (part_matches_alias(texture->parts[i], norm)) {
             return static_cast<int>(i);
         }
     }
@@ -1143,6 +1238,32 @@ int number_after_any(const std::string& text, const std::vector<std::string>& ke
         }
     }
     return fallback;
+}
+
+bool parse_rating_feedback(const std::string& prompt, int& rating, std::string& obs) {
+    std::string norm = normalize_text(prompt);
+    std::regex keyed(R"((?:rate|rating|nota|avaliacao|avalia o|avaliar)\s+(\d{1,2})(?:\s+(.*))?)");
+    std::smatch match;
+    if (std::regex_search(norm, match, keyed)) {
+        rating = std::stoi(match[1].str());
+        size_t pos = prompt.find(match[1].str());
+        obs = pos == std::string::npos ? "" : prompt.substr(pos + match[1].str().size());
+    } else {
+        std::regex bare(R"(^\s*(\d{1,2})(?:\s*[:;\-]\s*|\s+)(.+)$)");
+        if (!std::regex_search(prompt, match, bare)) {
+            return false;
+        }
+        rating = std::stoi(match[1].str());
+        obs = match.size() > 2 ? match[2].str() : "";
+    }
+    obs = std::regex_replace(obs, std::regex(R"(^\s*(obs|observacao|porque|pq|pois|comentario|comment)\s*[:;\-]?\s*)", std::regex_constants::icase), "");
+    while (!obs.empty() && std::isspace(static_cast<unsigned char>(obs.front()))) {
+        obs.erase(obs.begin());
+    }
+    while (!obs.empty() && std::isspace(static_cast<unsigned char>(obs.back()))) {
+        obs.pop_back();
+    }
+    return true;
 }
 
 std::string recipe_from_current_state() {
@@ -1329,9 +1450,15 @@ std::string builtin_recipe_from_prompt(const std::string& prompt) {
     if (part_index >= 0 && current_template()) {
         recipe << "agent-select-part " << current_template()->parts[part_index].id << "\n";
     } else if (contains_norm(prompt, "imagem inteira") || contains_norm(prompt, "whole image") || contains_norm(prompt, "full image") || contains_norm(prompt, "template todo") || contains_norm(prompt, "tudo")) {
-        recipe << "whole\n";
+        recipe << "agent-select-all\n";
+    } else if (contains_norm(prompt, "camada atual") || contains_norm(prompt, "current layer")) {
+        recipe << "agent-select-current-layer\n";
+    } else if (contains_norm(prompt, "part atual") || contains_norm(prompt, "parte atual") || contains_norm(prompt, "selected part") || contains_norm(prompt, "parte selecionada")) {
+        recipe << "agent-select-current-part\n";
+    } else if (current_part()) {
+        recipe << "agent-select-current-part\n";
     } else {
-        recipe << "agent-select-part\n";
+        recipe << "agent-auto-select-part\n";
     }
 
     COLORREF wanted = parse_any_color(prompt, g_app.brush_color);
@@ -1359,7 +1486,7 @@ std::string builtin_recipe_from_prompt(const std::string& prompt) {
 
     if (contains_norm(prompt, "borracha") || contains_norm(prompt, "eraser") || contains_norm(prompt, "apagar")) {
         recipe << "agent-select-ferramenta eraser\n";
-    } else if (contains_norm(prompt, "balde") || contains_norm(prompt, "bucket") || contains_norm(prompt, "preencher") || contains_norm(prompt, "fill")) {
+    } else if (contains_norm(prompt, "balde") || contains_norm(prompt, "bucket") || contains_norm(prompt, "preenche") || contains_norm(prompt, "preencher") || contains_norm(prompt, "fill")) {
         recipe << "agent-select-ferramenta bucket\n";
     } else if (contains_norm(prompt, "selecionar") || contains_norm(prompt, "select")) {
         recipe << "agent-select-ferramenta select\n";
@@ -1400,7 +1527,7 @@ std::string builtin_recipe_from_prompt(const std::string& prompt) {
         recipe << "clear\n";
     } else if ((contains_norm(prompt, "amarelo") || contains_norm(prompt, "yellow")) && (contains_norm(prompt, "azul") || contains_norm(prompt, "blue") || contains_norm(prompt, "cor") || contains_norm(prompt, "color"))) {
         recipe << "agent-pintar\n";
-    } else if (contains_norm(prompt, "preencher") || contains_norm(prompt, "encher") || contains_norm(prompt, "fill")) {
+    } else if (contains_norm(prompt, "preenche") || contains_norm(prompt, "preencher") || contains_norm(prompt, "encher") || contains_norm(prompt, "fill")) {
         recipe << "agent-fill\n";
     }
     recipe << "agent-rate\n";
@@ -1410,6 +1537,8 @@ std::string builtin_recipe_from_prompt(const std::string& prompt) {
 bool execute_genus_recipe(const std::string& recipe, std::wstring* report = nullptr) {
     bool changed_image = false;
     bool changed_state = false;
+    bool target_failed = false;
+    std::wstring target_error;
     COLORREF source_color = RGB(255, 210, 0);
     bool has_source_color = false;
     int confidence_percent = 72;
@@ -1426,31 +1555,37 @@ bool execute_genus_recipe(const std::string& recipe, std::wstring* report = null
             command = "template";
         } else if (command == "agent-select-part") {
             if (normalize_text(rest).empty()) {
-                if (!current_part() && current_template() && !current_template()->parts.empty()) {
-                    g_app.selected_part = 0;
-                    SendMessageW(g_parts, LB_SETCURSEL, g_app.selected_part, 0);
-                    changed_state = true;
+                if (!current_part()) {
+                    target_failed = true;
+                    target_error = L"Genus precisa de uma part selecionada para esse agent-select-part vazio.";
+                    break;
                 }
                 continue;
             }
             command = "part";
         } else if (command == "agent-select-ferramenta" || command == "agent-select-tool") {
             command = "tool";
-        } else if (command == "agent-fill") {
+        } else if (command == "agent-fill" || command == "agent-fill-selection") {
             command = "fill";
         } else if (command == "agent-brush") {
             command = "tool";
             rest = " pencil";
         } else if (command == "agent-crop-layer" || command == "agent-recorte") {
+            if (target_failed) {
+                break;
+            }
             if (g_app.image) {
                 crop_selected_part_to_layer();
                 changed_image = true;
             }
             continue;
         } else if (command == "agent-rate") {
-            set_status(L"Genus executou. Avalie de 0-10 depois com: rate 8 / nota 8.");
+            set_status(L"Genus executou. Avalie com: nota 8 obs acertou a cor, errou a sombra.");
             continue;
-        } else if (command == "agent-pintar" || command == "agent-paint" || command == "recolor") {
+        } else if (command == "agent-pintar" || command == "agent-paint" || command == "agent-paint-selection" || command == "recolor") {
+            if (target_failed) {
+                break;
+            }
             if (g_app.image) {
                 push_undo_snapshot();
                 COLORREF from = has_source_color ? source_color : RGB(255, 210, 0);
@@ -1477,10 +1612,50 @@ bool execute_genus_recipe(const std::string& recipe, std::wstring* report = null
                 g_app.selected_part = index;
                 SendMessageW(g_parts, LB_SETCURSEL, g_app.selected_part, 0);
                 changed_state = true;
+            } else {
+                target_failed = true;
+                target_error = L"Genus nao encontrou a part '" + widen(rest) + L"'.";
+                break;
             }
         } else if (command == "whole" || command == "full") {
             g_app.selected_part = -1;
             SendMessageW(g_parts, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+            changed_state = true;
+        } else if (command == "agent-select-all" || command == "agent-select-tudo" || command == "select-all") {
+            g_app.selected_part = -1;
+            SendMessageW(g_parts, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+            changed_state = true;
+        } else if (command == "agent-select-current-part" || command == "agent-current-part") {
+            if (!current_part()) {
+                target_failed = true;
+                target_error = L"Genus pediu a part atual, mas nenhuma part esta selecionada.";
+                break;
+            }
+            changed_state = true;
+        } else if (command == "agent-auto-select-part") {
+            int index = normalize_text(rest).empty() ? (current_part() ? g_app.selected_part : -1) : find_part_index_by_text(rest);
+            if (index >= 0) {
+                g_app.selected_part = index;
+                SendMessageW(g_parts, LB_SETCURSEL, g_app.selected_part, 0);
+                changed_state = true;
+            } else {
+                target_failed = true;
+                target_error = L"Genus nao conseguiu auto-selecionar a part.";
+                break;
+            }
+        } else if (command == "agent-select-current-layer" || command == "agent-current-layer") {
+            if (g_app.floating_layer) {
+                set_tool(Tool::Select);
+                changed_state = true;
+            } else {
+                target_failed = true;
+                target_error = L"Genus pediu a camada atual, mas nao existe camada recortada ativa.";
+                break;
+            }
+        } else if (command == "agent-layer-base" || command == "agent-select-base-layer") {
+            if (g_app.floating_layer) {
+                merge_floating_layer();
+            }
             changed_state = true;
         } else if (command == "tool" || command == "ferramenta") {
             if (contains_norm(rest, "eraser") || contains_norm(rest, "borracha")) {
@@ -1522,6 +1697,9 @@ bool execute_genus_recipe(const std::string& recipe, std::wstring* report = null
             has_source_color = true;
             changed_state = true;
         } else if (command == "fill" || command == "preencher") {
+            if (target_failed) {
+                break;
+            }
             if (g_app.image) {
                 Tool old_tool = g_app.tool;
                 set_tool(Tool::Bucket);
@@ -1532,23 +1710,31 @@ bool execute_genus_recipe(const std::string& recipe, std::wstring* report = null
                 changed_image = true;
             }
         } else if (command == "clear" || command == "limpar") {
+            if (target_failed) {
+                break;
+            }
             if (g_app.image) {
                 push_undo_snapshot();
                 clear_editable_area();
                 changed_image = true;
             }
         } else if (command == "crop" || command == "recorte" || command == "recortar") {
+            if (target_failed) {
+                break;
+            }
             crop_selected_part_to_layer();
             changed_image = true;
         }
     }
     sync_tool_controls_after_ai();
     if (report) {
-        *report = changed_image
+        *report = target_failed
+            ? (target_error.empty() ? L"Genus nao conseguiu resolver o alvo com seguranca." : target_error)
+            : (changed_image
             ? L"Genus executou e alterou a textura."
-            : (changed_state ? L"Genus ajustou o editor." : L"Genus nao encontrou acoes validas.");
+            : (changed_state ? L"Genus ajustou o editor." : L"Genus nao encontrou acoes validas."));
     }
-    return changed_image || changed_state;
+    return !target_failed && (changed_image || changed_state);
 }
 
 std::vector<std::string> recipe_tokens(const std::string& text) {
@@ -1621,6 +1807,12 @@ bool genus_recipe_has_real_action(const std::string& recipe) {
         || norm.find("opacity") != std::string::npos
         || norm.find("confidence") != std::string::npos
         || norm.find("tolerance") != std::string::npos
+        || norm.find("agent select part") != std::string::npos
+        || norm.find("agent auto select part") != std::string::npos
+        || norm.find("agent select current part") != std::string::npos
+        || norm.find("agent select all") != std::string::npos
+        || norm.find("agent select current layer") != std::string::npos
+        || norm.find("agent layer base") != std::string::npos
         || norm.find("agent select ferramenta pencil") != std::string::npos
         || norm.find("agent select ferramenta brush") != std::string::npos
         || norm.find("agent select ferramenta eraser") != std::string::npos
@@ -1637,7 +1829,9 @@ std::string default_teach_recipe_for_prompt(const std::string& prompt) {
     out << "# Apagar uma parte: agent-select-part hammer  -> clear\n";
     out << "# Recortar camada: agent-select-ferramenta crop -> agent-crop-layer\n";
     out << "# Recolorir: source-color yellow -> color #267EFF -> confidence 65 -> agent-pintar\n";
-    out << "agent-select-part\n";
+    out << "# Alvos: agent-select-part gun | agent-auto-select-part weapon | agent-select-current-part | agent-select-all\n";
+    out << "# Camadas: agent-select-current-layer | agent-crop-layer\n";
+    out << "agent-auto-select-part\n";
     out << "# agent-select-ferramenta select|pencil|eraser|bucket|crop\n";
     out << "# color #267EFF\n";
     out << "# source-color yellow\n";
@@ -1662,16 +1856,20 @@ void begin_ai_teach_mode(const std::string& prompt) {
 }
 
 bool handle_genus_rating(const std::string& prompt) {
-    int rating = number_after_any(prompt, {"rate", "rating", "nota", "avaliacao", "avaliaÃ§Ã£o"}, -1);
-    if (rating < 0) {
+    int rating = -1;
+    std::string obs;
+    if (!parse_rating_feedback(prompt, rating, obs)) {
         return false;
     }
     rating = clamp_int(rating, 0, 10);
     fs::path train_dir = g_app.root / "IA-TRAIN";
     fs::create_directories(train_dir);
     std::ofstream file(train_dir / "genus-ratings.jsonl", std::ios::binary | std::ios::app);
-    file << "{\"agent\":\"agent-rate\",\"rating\":" << rating << ",\"request\":\"" << escape_json(g_app.last_ai_prompt) << "\"}\n";
-    set_status(L"Nota salva para o agent-rate: " + std::to_wstring(rating) + L"/10.");
+    file << "{\"agent\":\"agent-rate\",\"rating\":" << rating
+         << ",\"obs\":\"" << escape_json(obs)
+         << "\",\"request\":\"" << escape_json(g_app.last_ai_prompt) << "\"}\n";
+    set_status(L"Nota salva para o agent-rate: " + std::to_wstring(rating) + L"/10"
+        + (obs.empty() ? L"." : L" com observacao."));
     return true;
 }
 
@@ -1945,7 +2143,7 @@ void layout(HWND hwnd) {
         ShowWindow(g_ai_train, SW_HIDE);
     }
     layout_tool_panel_controls(hwnd);
-    InvalidateRect(hwnd, nullptr, TRUE);
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 Rect canvas_rect(HWND hwnd) {
@@ -2462,16 +2660,6 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
     g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
     g.Clear(Color(255, 5, 5, 6));
 
-    Pen background_grid(Color(10, 255, 255, 255), 1.0f);
-    int bg_start_x = (repaint.left / 26) * 26;
-    int bg_start_y = (repaint.top / 26) * 26;
-    for (int x = bg_start_x; x < repaint.right; x += 26) {
-        g.DrawLine(&background_grid, x, 0, x, client.bottom);
-    }
-    for (int y = bg_start_y; y < repaint.bottom; y += 26) {
-        g.DrawLine(&background_grid, 0, y, client.right, y);
-    }
-
     SolidBrush menu(Color(245, 6, 7, 9));
     g.FillRectangle(&menu, 0, 0, client.right, UI_MENU_H);
 
@@ -2488,8 +2676,8 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
 
     Rect left_panel(UI_TOOLBAR_W, UI_MENU_H + UI_OPTIONS_H, UI_LEFT_PANEL_W, client.bottom - UI_MENU_H - UI_OPTIONS_H - UI_STATUS_H);
     Rect right_panel(client.right - UI_RIGHT_PANEL_W, UI_MENU_H + UI_OPTIONS_H, UI_RIGHT_PANEL_W, client.bottom - UI_MENU_H - UI_OPTIONS_H - UI_STATUS_H);
-    draw_panel_shell(g, left_panel, Color(235, 12, 15, 21), Color(54, 255, 255, 255));
-    draw_panel_shell(g, right_panel, Color(235, 12, 15, 21), Color(54, 255, 255, 255));
+    draw_panel_shell(g, left_panel, Color(255, 12, 15, 21), Color(54, 255, 255, 255));
+    draw_panel_shell(g, right_panel, Color(255, 12, 15, 21), Color(54, 255, 255, 255));
 
     SolidBrush brand(Color(255, 244, 244, 244));
     SolidBrush muted(Color(255, 166, 166, 170));
@@ -2538,8 +2726,14 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
 
     Pen canvas_grid(Color(26, 255, 255, 255), 1.0f);
     constexpr int canvas_grid_step = 32;
-    int canvas_start_x = canvas.X + std::max(1, static_cast<int>((repaint.left - canvas.X) / canvas_grid_step)) * canvas_grid_step;
-    int canvas_start_y = canvas.Y + std::max(1, static_cast<int>((repaint.top - canvas.Y) / canvas_grid_step)) * canvas_grid_step;
+    int canvas_start_x = canvas.X;
+    int canvas_start_y = canvas.Y;
+    if (repaint.left > canvas.X) {
+        canvas_start_x += ((repaint.left - canvas.X) / canvas_grid_step) * canvas_grid_step;
+    }
+    if (repaint.top > canvas.Y) {
+        canvas_start_y += ((repaint.top - canvas.Y) / canvas_grid_step) * canvas_grid_step;
+    }
     int canvas_end_x = std::min(canvas.X + canvas.Width, static_cast<int>(repaint.right));
     int canvas_end_y = std::min(canvas.Y + canvas.Height, static_cast<int>(repaint.bottom));
     for (int x = canvas_start_x; x < canvas_end_x; x += canvas_grid_step) {
@@ -2551,6 +2745,9 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
 
     Pen frame(Color(210, 0, 158, 205), 2.0f);
     g.DrawRectangle(&frame, canvas);
+
+    Gdiplus::GraphicsState before_canvas_clip = g.Save();
+    g.SetClip(canvas, Gdiplus::CombineModeReplace);
 
     if (g_app.image) {
         g_app.image_rect = fit_image_rect(canvas, g_app.image.get());
@@ -2658,6 +2855,7 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
     g.DrawString(hud_label.c_str(), -1, &font, Gdiplus::PointF(static_cast<float>(hud.X + 8), static_cast<float>(hud.Y + 6)), &hud_text);
 
     draw_tool_options_panel(g);
+    g.Restore(before_canvas_clip);
 }
 
 void paint(HWND hwnd) {
@@ -2725,7 +2923,7 @@ void invalidate_tool_ui() {
     HWND buttons[] = {g_select_tool, g_pencil_tool, g_eraser_tool, g_bucket_tool, g_crop_tool, g_color_pick, g_tool_preview, g_shape_round, g_shape_square};
     for (HWND hwnd : buttons) {
         if (hwnd) {
-            InvalidateRect(hwnd, nullptr, TRUE);
+            InvalidateRect(hwnd, nullptr, FALSE);
         }
     }
 }

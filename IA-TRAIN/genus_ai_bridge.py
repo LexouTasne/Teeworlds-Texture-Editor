@@ -9,36 +9,9 @@ ENV_FILE = TRAIN / ".env.local"
 LOG_FILE = TRAIN / "genus-ai-calls.jsonl"
 
 SYSTEM_PROMPT = """
-Voce e o cerebro do Teeworlds Texture Editor Genus.
-Responda SOMENTE com receita de agentes, uma linha por comando. Sem markdown, sem explicacao.
-A receita sera executada por um editor C++.
-
-Comandos aceitos:
-agent-select-template <id ou texto>
-agent-select-part <id ou texto da part>
-agent-select-ferramenta select|pencil|brush|eraser|bucket|crop
-color #RRGGBB
-source-color #RRGGBB|yellow|blue|red|green|black|white
-confidence 0-100
-tolerance 0-255
-size 1-128
-opacity 0-100
-shape round|square
-agent-pintar
-agent-fill
-agent-crop-layer
-clear
-agent-rate
-
-Regras importantes:
-- Se o usuario pedir para apagar/remover/deletar uma part, selecione a part e use clear.
-- Exemplo: "apaga o hammer" =>
-agent-select-part hammer
-clear
-agent-rate
-- Se pedir recorte, use agent-select-ferramenta crop e agent-crop-layer.
-- Se pedir para trocar uma cor por outra, use source-color, color, confidence e agent-pintar.
-- Use PT-BR ou ingles naturalmente, mas a saida deve ser receita.
+Voce e o roteador treinavel do Genus. Use principalmente os exemplos aprendidos.
+Responda SOMENTE com uma receita agent-* executavel, uma linha por comando, sem markdown.
+Sempre termine com agent-rate para o usuario dar nota e obs.
 """.strip()
 
 COLOR_WORDS = {
@@ -92,9 +65,13 @@ def valid_recipe(text: str) -> str:
     lines = []
     allowed = (
         "agent-select-template", "agent-select-part", "agent-select-ferramenta",
-        "agent-select-tool", "color", "cor", "source-color", "confidence", "confianca",
+        "agent-select-tool", "agent-select-all", "agent-select-tudo",
+        "agent-select-current-part", "agent-current-part", "agent-auto-select-part",
+        "agent-select-current-layer", "agent-current-layer",
+        "agent-select-layer", "agent-layer-base", "color", "cor", "source-color", "confidence", "confianca",
         "tolerance", "tolerancia", "size", "opacity", "shape", "agent-pintar",
-        "agent-paint", "agent-fill", "agent-crop-layer", "agent-recorte", "clear",
+        "agent-paint", "agent-paint-selection", "agent-fill", "agent-fill-selection",
+        "agent-crop-layer", "agent-recorte", "clear",
         "limpar", "crop", "recorte", "agent-rate", "whole", "full", "part", "tool",
     )
     for raw in text.splitlines():
@@ -111,53 +88,96 @@ def valid_recipe(text: str) -> str:
         recipe += "\nagent-rate"
     return recipe
 
-def local_rules(prompt: str) -> str:
+def wanted_color(prompt: str) -> str:
     n = norm(prompt)
-    delete = any(w in n for w in ["apaga", "apagar", "remove", "remover", "deleta", "deletar", "delete", "erase"])
-    if delete:
-        m = re.search(r"(?:apaga|apagar|remove|remover|deleta|deletar|delete|erase)\s+(?:o|a|os|as|the)?\s*([a-zA-Z0-9_\- ]{2,48})", prompt, re.I)
-        target = (m.group(1).strip() if m else "").strip(".,;:!")
-        if not target:
-            target = "selected"
-        return f"agent-select-part {target}\nclear\nagent-rate"
-    if any(w in n for w in ["recorte", "recortar", "crop", "cut out"]):
-        return "agent-select-ferramenta crop\nagent-crop-layer\nagent-rate"
-    if any(w in n for w in ["preencher", "balde", "fill", "bucket"]):
-        return "agent-select-part\nagent-select-ferramenta bucket\nagent-fill\nagent-rate"
-    if any(w in n for w in ["troca", "muda", "recolor", "pintar", "paint"]):
-        src = "#FFD200" if ("amarelo" in n or "yellow" in n) else "#FFD200"
-        dst = None
-        for word, value in COLOR_WORDS.items():
-            if word in n:
-                dst = value
-        if dst:
-            return f"agent-select-part\nsource-color {src}\ncolor {dst}\nconfidence 65\nagent-pintar\nagent-rate"
+    for word, value in COLOR_WORDS.items():
+        if word in n:
+            return value
+    m = re.search(r"#[0-9a-fA-F]{6}", prompt)
+    return m.group(0).upper() if m else ""
+
+def extract_target(prompt: str) -> str:
+    raw = prompt.strip()
+    patterns = [
+        r"(?:part|parte)\s+([a-zA-Z0-9_\- ]{2,48})",
+        r"(?:o|a|the)\s+([a-zA-Z0-9_\-]{2,32})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, raw, re.I)
+        if not m:
+            continue
+        target = m.group(1).strip(" .,;:!?")
+        target = re.split(r"\s+(?:com|para|pra|de|do|da|with|to|from|em|in)\s+", target, maxsplit=1, flags=re.I)[0].strip()
+        if target and target.lower() not in {"part", "parte", "imagem", "template", "tudo", "all"}:
+            return target
+    if any(w in norm(raw) for w in ["part atual", "parte atual", "selecionada", "selected part"]):
+        return "selected"
     return ""
 
-def read_training_context(limit=12):
-    f = TRAIN / "genus-training.jsonl"
-    if not f.exists():
-        return ""
-    lines = f.read_text(encoding="utf-8", errors="ignore").splitlines()[-limit:]
-    examples = []
-    for line in lines:
+def local_rules(prompt: str) -> str:
+    n = norm(prompt)
+    target = extract_target(prompt)
+    target_line = f"agent-select-part {target}" if target else "agent-select-current-part"
+    delete = any(w in n for w in ["apaga", "apagar", "remove", "remover", "deleta", "deletar", "delete", "erase"])
+    if delete:
+        return f"{target_line}\nclear\nagent-rate"
+    if any(w in n for w in ["recorte", "recortar", "crop", "cut out"]):
+        return f"{target_line}\nagent-select-ferramenta crop\nagent-crop-layer\nagent-rate"
+    if any(w in n for w in ["preenche", "preencher", "balde", "fill", "bucket"]):
+        color = wanted_color(prompt)
+        color_line = f"\ncolor {color}" if color else ""
+        return f"{target_line}\nagent-select-ferramenta bucket{color_line}\nagent-fill\nagent-rate"
+    if any(w in n for w in ["troca", "muda", "recolor", "pintar", "paint"]):
+        src = "#FFD200" if ("amarelo" in n or "yellow" in n) else "#FFD200"
+        dst = wanted_color(prompt)
+        if dst:
+            return f"{target_line}\nsource-color {src}\ncolor {dst}\nconfidence 65\nagent-pintar\nagent-rate"
+    return ""
+
+def score_example(prompt: str, request: str) -> int:
+    pt = {x for x in norm(prompt).split() if len(x) >= 3}
+    rt = {x for x in norm(request).split() if len(x) >= 3}
+    return len(pt & rt)
+
+def read_jsonl_examples(path: Path):
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         try:
             obj = json.loads(line)
             req = obj.get("request", "")[:180]
-            rec = obj.get("recipe", "")[:500]
+            rec = obj.get("recipe", "")[:520]
             if req and rec:
-                examples.append(f"Pedido: {req}\nReceita:\n{rec}")
+                out.append((req, rec))
         except Exception:
             pass
+    return out
+
+def read_training_context(prompt: str, limit=18):
+    examples = []
+    examples += read_jsonl_examples(TRAIN / "genus-training.jsonl")
+    examples += read_jsonl_examples(TRAIN / "genus-simulations.jsonl")
+    ranked = sorted(examples, key=lambda x: score_example(prompt, x[0]), reverse=True)
+    examples = []
+    seen = set()
+    for req, rec in ranked[:limit * 3]:
+        if (req, rec) in seen:
+            continue
+        seen.add((req, rec))
+        examples.append(f"Pedido: {req}\nReceita:\n{rec}")
+        if len(examples) >= limit:
+            break
     return "\n\n".join(examples)
 
 def post_chat(url, key, model, prompt, provider, timeout=None):
     if timeout is None:
         timeout = float(os.environ.get("GENUS_AI_TIMEOUT", "8"))
-    training = read_training_context()
+    training = read_training_context(prompt)
     user = "Pedido do usuario:\n" + prompt.strip()
     if training:
         user += "\n\nExemplos aprendidos localmente:\n" + training
+    user += "\n\nComandos validos: agent-select-part, agent-auto-select-part, agent-select-current-part, agent-select-all, agent-select-current-layer, agent-layer-base, agent-select-ferramenta, color, source-color, confidence, tolerance, size, opacity, shape, agent-fill, agent-fill-selection, agent-pintar, agent-paint-selection, agent-crop-layer, clear, agent-rate."
     body = {
         "model": model,
         "temperature": 0.1,
