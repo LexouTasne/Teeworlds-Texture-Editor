@@ -258,6 +258,7 @@ void load_default_image(bool force);
 void crop_selected_part_to_layer();
 void merge_floating_layer();
 void begin_ai_teach_mode(const std::string& prompt);
+bool focus_current_part();
 
 std::wstring widen(const std::string& text) {
     if (text.empty()) {
@@ -1481,6 +1482,13 @@ std::string builtin_recipe_from_prompt(const std::string& prompt) {
     if (contains_norm(prompt, "recortar") || contains_norm(prompt, "recorte") || contains_norm(prompt, "crop") || contains_norm(prompt, "cut out")) {
         recipe << "agent-select-ferramenta crop\n";
         recipe << "agent-crop-layer\n";
+        recipe << "agent-rate\n";
+        return recipe.str();
+    }
+
+    if (contains_norm(prompt, "foca") || contains_norm(prompt, "foco") || contains_norm(prompt, "focus") || contains_norm(prompt, "zoom na") || contains_norm(prompt, "zoom in")) {
+        recipe << "agent-focus-part\n";
+        recipe << "agent-rate\n";
         return recipe.str();
     }
 
@@ -1581,6 +1589,27 @@ bool execute_genus_recipe(const std::string& recipe, std::wstring* report = null
             continue;
         } else if (command == "agent-rate") {
             set_status(L"Genus executou. Avalie com: nota 8 obs acertou a cor, errou a sombra.");
+            continue;
+        } else if (command == "agent-focus-part" || command == "agent-focus" || command == "focus" || command == "foco") {
+            if (!normalize_text(rest).empty()) {
+                int index = find_part_index_by_text(rest);
+                if (index >= 0) {
+                    g_app.selected_part = index;
+                    SendMessageW(g_parts, LB_SETCURSEL, g_app.selected_part, 0);
+                    changed_state = true;
+                } else {
+                    target_failed = true;
+                    target_error = L"Genus nao encontrou a part para focar.";
+                    break;
+                }
+            }
+            if (focus_current_part()) {
+                changed_state = true;
+            } else {
+                target_failed = true;
+                target_error = L"Genus nao conseguiu aplicar o foco.";
+                break;
+            }
             continue;
         } else if (command == "agent-pintar" || command == "agent-paint" || command == "agent-paint-selection" || command == "recolor") {
             if (target_failed) {
@@ -1813,6 +1842,9 @@ bool genus_recipe_has_real_action(const std::string& recipe) {
         || norm.find("agent select all") != std::string::npos
         || norm.find("agent select current layer") != std::string::npos
         || norm.find("agent layer base") != std::string::npos
+        || norm.find("agent focus") != std::string::npos
+        || norm.find("focus") != std::string::npos
+        || norm.find("foco") != std::string::npos
         || norm.find("agent select ferramenta pencil") != std::string::npos
         || norm.find("agent select ferramenta brush") != std::string::npos
         || norm.find("agent select ferramenta eraser") != std::string::npos
@@ -1845,14 +1877,10 @@ std::string default_teach_recipe_for_prompt(const std::string& prompt) {
 
 void begin_ai_teach_mode(const std::string& prompt) {
     g_app.ai_teach_mode = true;
-    g_app.dev_mode = true;
     g_app.last_ai_prompt = prompt;
-    if (g_dev_check) {
-        SendMessageW(g_dev_check, BM_SETCHECK, BST_CHECKED, 0);
-    }
     SetWindowTextW(g_ai_steps, widen(default_teach_recipe_for_prompt(prompt)).c_str());
     layout(g_main);
-    set_status(L"Genus nao soube fazer. Edite a receita com agent-* e clique em Salvar ensino.");
+    set_status(L"Genus precisa de ensino. Edite a receita no modal central e salve.");
 }
 
 bool handle_genus_rating(const std::string& prompt) {
@@ -1924,18 +1952,61 @@ std::wstring quote_cmd_arg(const std::wstring& value) {
 
 std::string run_process_capture(const std::wstring& command) {
     std::string output;
-    FILE* pipe = _wpopen(command.c_str(), L"r");
-    if (!pipe) {
+    SECURITY_ATTRIBUTES security{};
+    security.nLength = sizeof(security);
+    security.bInheritHandle = TRUE;
+
+    HANDLE read_pipe = nullptr;
+    HANDLE write_pipe = nullptr;
+    if (!CreatePipe(&read_pipe, &write_pipe, &security, 0)) {
         return output;
     }
+    SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = write_pipe;
+    startup.hStdError = write_pipe;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+    PROCESS_INFORMATION process{};
+    std::wstring mutable_command = command;
+    BOOL started = CreateProcessW(
+        nullptr,
+        mutable_command.data(),
+        nullptr,
+        nullptr,
+        TRUE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &startup,
+        &process);
+    CloseHandle(write_pipe);
+    if (!started) {
+        CloseHandle(read_pipe);
+        return output;
+    }
+
+    DWORD wait = WaitForSingleObject(process.hProcess, 5500);
+    if (wait == WAIT_TIMEOUT) {
+        TerminateProcess(process.hProcess, 1);
+        WaitForSingleObject(process.hProcess, 500);
+    }
+
     char buffer[4096];
-    while (fgets(buffer, sizeof(buffer), pipe)) {
-        output += buffer;
+    DWORD read = 0;
+    while (ReadFile(read_pipe, buffer, sizeof(buffer) - 1, &read, nullptr) && read > 0) {
+        buffer[read] = '\0';
+        output.append(buffer, read);
         if (output.size() > 16384) {
             break;
         }
     }
-    _pclose(pipe);
+    CloseHandle(read_pipe);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
     while (!output.empty() && (output.back() == '\n' || output.back() == '\r' || output.back() == ' ' || output.back() == '\t')) {
         output.pop_back();
     }
@@ -1968,6 +2039,15 @@ std::string cloud_genus_recipe(const std::string& prompt) {
     }
     return recipe;
 }
+
+bool should_use_local_genus_first(const std::string& prompt) {
+    return contains_norm(prompt, "foca")
+        || contains_norm(prompt, "foco")
+        || contains_norm(prompt, "focus")
+        || contains_norm(prompt, "zoom na")
+        || contains_norm(prompt, "zoom in");
+}
+
 void run_genus() {
     std::string prompt = narrow(read_control(g_ai_prompt));
     if (normalize_text(prompt).empty()) {
@@ -1980,6 +2060,10 @@ void run_genus() {
     g_app.last_ai_prompt = prompt;
     std::string recipe = find_trained_genus_recipe(prompt);
     std::wstring source = L"ensino salvo";
+    if (recipe.empty() && should_use_local_genus_first(prompt)) {
+        recipe = builtin_recipe_from_prompt(prompt);
+        source = L"parser PT/EN local";
+    }
     if (recipe.empty()) {
         recipe = cloud_genus_recipe(prompt);
         source = L"IA externa";
@@ -2100,10 +2184,12 @@ void layout(HWND hwnd) {
     MoveWindow(g_tool_preview, right_x, y, right_panel_w - 24, 136, TRUE);
     y += 154;
 
-    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_apply, g_new_part, g_delete_part, g_part_up, g_part_down, g_save, g_ai_prompt, g_ai_steps, g_ai_run};
+    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_apply, g_new_part, g_delete_part, g_part_up, g_part_down, g_save, g_ai_prompt, g_ai_steps, g_ai_train, g_ai_run};
     for (HWND child : children) {
         ShowWindow(child, g_app.dev_mode ? SW_SHOW : SW_HIDE);
     }
+    SetWindowTextW(g_ai_run, g_app.ai_teach_mode ? L"Cancelar" : L"Enviar");
+    SetWindowTextW(g_ai_train, L"Salvar ensino");
 
     if (g_app.dev_mode) {
         HWND labels[6] = {};
@@ -2131,16 +2217,30 @@ void layout(HWND hwnd) {
         MoveWindow(g_save, right_x, y + 128, right_panel_w - 24, 34, TRUE);
         MoveWindow(g_ai_prompt, right_x, y + 176, right_panel_w - 24, 28, TRUE);
         MoveWindow(g_ai_run, right_x, y + 210, right_panel_w - 24, 32, TRUE);
-        MoveWindow(g_ai_steps, right_x, y + 252, right_panel_w - 24, 92, TRUE);
-        MoveWindow(g_ai_train, right_x, y + 352, right_panel_w - 24, 30, TRUE);
-        ShowWindow(g_ai_steps, g_app.ai_teach_mode ? SW_SHOW : SW_HIDE);
-        ShowWindow(g_ai_train, g_app.ai_teach_mode ? SW_SHOW : SW_HIDE);
+        if (!g_app.ai_teach_mode) {
+            MoveWindow(g_ai_steps, right_x, y + 252, right_panel_w - 24, 92, TRUE);
+            MoveWindow(g_ai_train, right_x, y + 352, right_panel_w - 24, 30, TRUE);
+            ShowWindow(g_ai_steps, SW_HIDE);
+            ShowWindow(g_ai_train, SW_HIDE);
+        }
     } else {
         for (int id = 2001; id <= 2006; ++id) {
             ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
         }
         ShowWindow(g_ai_steps, SW_HIDE);
         ShowWindow(g_ai_train, SW_HIDE);
+    }
+    if (g_app.ai_teach_mode) {
+        int modal_w = std::min(720, std::max(420, width - 160));
+        int modal_h = std::min(430, std::max(300, height - 160));
+        int modal_x = std::max(20, (width - modal_w) / 2);
+        int modal_y = std::max(UI_MENU_H + UI_OPTIONS_H + 20, (height - modal_h) / 2);
+        ShowWindow(g_ai_steps, SW_SHOW);
+        ShowWindow(g_ai_train, SW_SHOW);
+        ShowWindow(g_ai_run, SW_SHOW);
+        MoveWindow(g_ai_steps, modal_x + 28, modal_y + 86, modal_w - 56, modal_h - 154, TRUE);
+        MoveWindow(g_ai_train, modal_x + modal_w - 292, modal_y + modal_h - 50, 132, 32, TRUE);
+        MoveWindow(g_ai_run, modal_x + modal_w - 150, modal_y + modal_h - 50, 122, 32, TRUE);
     }
     layout_tool_panel_controls(hwnd);
     InvalidateRect(hwnd, nullptr, FALSE);
@@ -2151,8 +2251,9 @@ Rect canvas_rect(HWND hwnd) {
     GetClientRect(hwnd, &client);
     int left = UI_TOOLBAR_W + UI_LEFT_PANEL_W + UI_GAP;
     int top = UI_MENU_H + UI_OPTIONS_H;
-    int right_panel = UI_RIGHT_PANEL_W;
-    return Rect(left, top, std::max(50, static_cast<int>(client.right) - left - right_panel - UI_GAP), std::max(50, static_cast<int>(client.bottom) - top - UI_STATUS_H - UI_GAP));
+    int right_limit = static_cast<int>(client.right) - UI_RIGHT_PANEL_W - UI_GAP;
+    int bottom_limit = static_cast<int>(client.bottom) - UI_STATUS_H - UI_GAP;
+    return Rect(left, top, std::max(1, right_limit - left), std::max(1, bottom_limit - top));
 }
 
 Rect fit_image_rect(const Rect& bounds, Image* image) {
@@ -2360,6 +2461,37 @@ void fit_zoom() {
     g_app.pan_y = 0;
     update_zoom_label();
     InvalidateRect(g_main, nullptr, FALSE);
+}
+
+bool focus_current_part() {
+    if (!g_app.image) {
+        set_status(L"Abra uma imagem antes de focar uma part.");
+        return false;
+    }
+    Part* part = current_part();
+    if (!part) {
+        set_status(L"Selecione uma part para focar.");
+        return false;
+    }
+    Rect canvas = canvas_rect(g_main);
+    Rect src = part_to_source_rect(*part);
+    if (canvas.Width <= 1 || canvas.Height <= 1 || src.Width <= 0 || src.Height <= 0) {
+        return false;
+    }
+    double zoom_x = static_cast<double>(canvas.Width) * 0.72 / src.Width;
+    double zoom_y = static_cast<double>(canvas.Height) * 0.72 / src.Height;
+    g_app.fit_to_view = false;
+    g_app.zoom = std::max(0.25, std::min(16.0, std::min(zoom_x, zoom_y)));
+    double image_w = static_cast<double>(g_app.image->GetWidth()) * g_app.zoom;
+    double image_h = static_cast<double>(g_app.image->GetHeight()) * g_app.zoom;
+    double cx = (src.X + src.Width / 2.0) * g_app.zoom;
+    double cy = (src.Y + src.Height / 2.0) * g_app.zoom;
+    g_app.pan_x = static_cast<int>(std::round(canvas.Width / 2.0 - cx - (canvas.Width - image_w) / 2.0));
+    g_app.pan_y = static_cast<int>(std::round(canvas.Height / 2.0 - cy - (canvas.Height - image_h) / 2.0));
+    update_zoom_label();
+    InvalidateRect(g_main, nullptr, FALSE);
+    set_status(L"Foco aplicado na part: " + widen(part->id) + L".");
+    return true;
 }
 
 void fill_brush_stamp(Graphics& image_g, SolidBrush& brush, int center_x, int center_y, int size) {
@@ -2654,6 +2786,64 @@ void draw_tool_options_panel(Graphics& g) {
     g.DrawLine(&active, slider_left, opacity_y, slider_left + clamp_int(active_tool_opacity(), 1, 100) * 168 / 100, opacity_y);
 }
 
+void draw_ai_teach_modal(Graphics& g, const RECT& client) {
+    if (!g_app.ai_teach_mode) {
+        return;
+    }
+    int width = client.right - client.left;
+    int height = client.bottom - client.top;
+    int modal_w = std::min(720, std::max(420, width - 160));
+    int modal_h = std::min(430, std::max(300, height - 160));
+    int modal_x = std::max(20, (width - modal_w) / 2);
+    int modal_y = std::max(UI_MENU_H + UI_OPTIONS_H + 20, (height - modal_h) / 2);
+    Rect modal(modal_x, modal_y, modal_w, modal_h);
+
+    SolidBrush dim(Color(166, 0, 0, 0));
+    g.FillRectangle(&dim, 0, UI_MENU_H + UI_OPTIONS_H, width, height - UI_MENU_H - UI_OPTIONS_H - UI_STATUS_H);
+
+    SolidBrush shadow(Color(110, 0, 0, 0));
+    g.FillRectangle(&shadow, modal.X + 10, modal.Y + 12, modal.Width, modal.Height);
+
+    Gdiplus::GraphicsPath path;
+    int d = 18;
+    path.AddArc(modal.X, modal.Y, d, d, 180, 90);
+    path.AddArc(modal.X + modal.Width - d, modal.Y, d, d, 270, 90);
+    path.AddArc(modal.X + modal.Width - d, modal.Y + modal.Height - d, d, d, 0, 90);
+    path.AddArc(modal.X, modal.Y + modal.Height - d, d, d, 90, 90);
+    path.CloseFigure();
+    SolidBrush fill(Color(252, 20, 23, 30));
+    Pen border(Color(180, 0, 158, 205), 1.4f);
+    g.FillPath(&fill, &path);
+    g.DrawPath(&border, &path);
+
+    Gdiplus::FontFamily family(L"Segoe UI");
+    Gdiplus::Font title_font(&family, 18.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+    Gdiplus::Font text_font(&family, 12.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    Gdiplus::Font code_font(&family, 11.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    SolidBrush title(Color(255, 246, 248, 252));
+    SolidBrush muted(Color(255, 176, 184, 196));
+    SolidBrush chip_fill(Color(255, 34, 39, 50));
+    Pen chip_border(Color(74, 255, 255, 255), 1.0f);
+
+    g.DrawString(L"Ensinar Genus", -1, &title_font, Gdiplus::PointF(static_cast<float>(modal.X + 28), static_cast<float>(modal.Y + 22)), &title);
+    g.DrawString(L"A IA nao conseguiu executar com seguranca. Ajuste a receita agent-* e salve o ensino.", -1, &text_font, Gdiplus::PointF(static_cast<float>(modal.X + 28), static_cast<float>(modal.Y + 50)), &muted);
+
+    const wchar_t* chips[] = {L"agent-select-part", L"agent-focus-part", L"agent-fill", L"agent-pintar", L"agent-crop-layer", L"clear", L"agent-rate"};
+    int chip_x = modal.X + 28;
+    int chip_y = modal.Y + modal.Height - 92;
+    for (const wchar_t* chip : chips) {
+        int chip_w = static_cast<int>(wcslen(chip)) * 7 + 18;
+        Rect chip_rect(chip_x, chip_y, chip_w, 24);
+        g.FillRectangle(&chip_fill, chip_rect);
+        g.DrawRectangle(&chip_border, chip_rect);
+        g.DrawString(chip, -1, &code_font, Gdiplus::PointF(static_cast<float>(chip_x + 8), static_cast<float>(chip_y + 6)), &muted);
+        chip_x += chip_w + 8;
+        if (chip_x > modal.X + modal.Width - 160) {
+            break;
+        }
+    }
+}
+
 void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repaint) {
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
@@ -2854,8 +3044,9 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
     Gdiplus::Font font(&family, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
     g.DrawString(hud_label.c_str(), -1, &font, Gdiplus::PointF(static_cast<float>(hud.X + 8), static_cast<float>(hud.Y + 6)), &hud_text);
 
-    draw_tool_options_panel(g);
     g.Restore(before_canvas_clip);
+    draw_tool_options_panel(g);
+    draw_ai_teach_modal(g, client);
 }
 
 void paint(HWND hwnd) {
@@ -3681,6 +3872,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     }
     case WM_LBUTTONDOWN:
         SetFocus(hwnd);
+        if (g_app.ai_teach_mode) {
+            return 0;
+        }
         if (g_app.tool_panel_open) {
             int mx = GET_X_LPARAM(lparam);
             int my = GET_Y_LPARAM(lparam);
@@ -3737,6 +3931,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         }
         return 0;
     case WM_RBUTTONDOWN:
+        if (g_app.ai_teach_mode) {
+            return 0;
+        }
         if (GetKeyState(VK_MENU) & 0x8000) {
             g_app.panning = true;
             g_app.last_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -4033,6 +4230,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             train_genus();
             return 0;
         case ID_AI_RUN:
+            if (g_app.ai_teach_mode) {
+                g_app.ai_teach_mode = false;
+                layout(hwnd);
+                set_status(L"Ensino do Genus cancelado.");
+                return 0;
+            }
             run_genus();
             return 0;
         case ID_SAVE:

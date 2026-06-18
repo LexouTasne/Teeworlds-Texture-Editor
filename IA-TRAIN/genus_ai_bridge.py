@@ -68,7 +68,8 @@ def valid_recipe(text: str) -> str:
         "agent-select-tool", "agent-select-all", "agent-select-tudo",
         "agent-select-current-part", "agent-current-part", "agent-auto-select-part",
         "agent-select-current-layer", "agent-current-layer",
-        "agent-select-layer", "agent-layer-base", "color", "cor", "source-color", "confidence", "confianca",
+        "agent-select-layer", "agent-layer-base", "agent-focus-part", "agent-focus",
+        "color", "cor", "source-color", "confidence", "confianca",
         "tolerance", "tolerancia", "size", "opacity", "shape", "agent-pintar",
         "agent-paint", "agent-paint-selection", "agent-fill", "agent-fill-selection",
         "agent-crop-layer", "agent-recorte", "clear",
@@ -99,6 +100,7 @@ def wanted_color(prompt: str) -> str:
 def extract_target(prompt: str) -> str:
     raw = prompt.strip()
     patterns = [
+        r"(?:foca|focar|foco|focus|zoom)\s+(?:para\s+mim\s+)?(?:no|na|o|a|the)?\s*([a-zA-Z0-9_\- ]{2,48})",
         r"(?:part|parte)\s+([a-zA-Z0-9_\- ]{2,48})",
         r"(?:o|a|the)\s+([a-zA-Z0-9_\-]{2,32})",
     ]
@@ -118,6 +120,8 @@ def local_rules(prompt: str) -> str:
     n = norm(prompt)
     target = extract_target(prompt)
     target_line = f"agent-select-part {target}" if target else "agent-select-current-part"
+    if any(w in n for w in ["foca", "focar", "foco", "focus", "zoom"]):
+        return f"{target_line}\nagent-focus-part\nagent-rate"
     delete = any(w in n for w in ["apaga", "apagar", "remove", "remover", "deleta", "deletar", "delete", "erase"])
     if delete:
         return f"{target_line}\nclear\nagent-rate"

@@ -29,6 +29,7 @@ agent-select-current-part
 agent-select-all
 agent-select-current-layer
 agent-layer-base
+agent-focus-part
 agent-select-ferramenta pencil
 agent-select-ferramenta brush
 agent-select-ferramenta eraser
@@ -80,6 +81,14 @@ agent-fill
 agent-rate
 ```
 
+### Focar uma part
+
+```text
+agent-select-part Effect_9
+agent-focus-part
+agent-rate
+```
+
 ### Recolorir amarelo para azul
 
 ```text
@@ -96,6 +105,7 @@ Pedidos que o parser entende:
 
 ```text
 preenche a part weapon com azul
+foca para mim o effect 9
 fill the weapon part with blue
 pinte tudo que e amarelo para azul com confianca 60
 paint every yellow part blue with confidence 60
