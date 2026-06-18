@@ -38,6 +38,11 @@ enum class Tool {
     Eraser
 };
 
+enum class BrushShape {
+    Round,
+    Square
+};
+
 struct Part {
     std::string id;
     std::string label;
@@ -72,6 +77,8 @@ struct AppState {
     bool right_erasing = false;
     Tool tool = Tool::Select;
     int brush_size = 8;
+    int brush_hardness = 100;
+    BrushShape brush_shape = BrushShape::Round;
     COLORREF brush_color = RGB(255, 255, 255);
     double zoom = 1.0;
     int pan_x = 0;
@@ -81,6 +88,8 @@ struct AppState {
     bool hover_canvas = false;
     bool tracking_mouse = false;
     std::unique_ptr<Bitmap> image;
+    std::vector<std::unique_ptr<Bitmap>> undo_stack;
+    std::vector<std::unique_ptr<Bitmap>> redo_stack;
     Rect image_rect;
     Rect preview_rect;
     ULONG_PTR gdiplus_token = 0;
@@ -122,6 +131,10 @@ WNDPROC g_edit_proc = nullptr;
 HBRUSH g_panel_brush = nullptr;
 HBRUSH g_edit_brush = nullptr;
 HWND g_options_window = nullptr;
+HWND g_options_size = nullptr;
+HWND g_options_hardness = nullptr;
+HWND g_shape_round = nullptr;
+HWND g_shape_square = nullptr;
 
 constexpr int ID_TEMPLATES = 1001;
 constexpr int ID_PARTS = 1002;
@@ -144,6 +157,12 @@ constexpr int ID_OPTIONS = 1018;
 constexpr int ID_TOOL_PREVIEW = 1019;
 constexpr int ID_OPTIONS_CLOSE = 1020;
 constexpr int ID_COLOR_PICK = 1021;
+constexpr int ID_SHAPE_ROUND = 1022;
+constexpr int ID_SHAPE_SQUARE = 1023;
+constexpr int ID_HARDNESS = 1024;
+constexpr int ID_BRUSH_SIZE = 1025;
+
+constexpr size_t MAX_HISTORY = 400;
 
 constexpr int UI_MENU_H = 34;
 constexpr int UI_OPTIONS_H = 44;
@@ -155,6 +174,9 @@ constexpr int UI_GAP = 10;
 
 void invalidate_tool_ui();
 void choose_brush_color(HWND owner);
+void undo_image();
+void redo_image();
+void subclass_edit(HWND hwnd);
 
 std::wstring widen(const std::string& text) {
     if (text.empty()) {
@@ -191,6 +213,16 @@ void set_control_int(HWND hwnd, int value) {
     SetWindowTextW(hwnd, std::to_wstring(value).c_str());
 }
 
+void set_control_int_if_changed(HWND hwnd, int value) {
+    if (!hwnd) {
+        return;
+    }
+    std::wstring next = std::to_wstring(value);
+    if (read_control(hwnd) != next) {
+        SetWindowTextW(hwnd, next.c_str());
+    }
+}
+
 void delete_previous_word(HWND hwnd) {
     DWORD start = 0;
     DWORD end = 0;
@@ -222,6 +254,14 @@ LRESULT CALLBACK edit_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         }
         if (wparam == VK_BACK) {
             delete_previous_word(hwnd);
+            return 0;
+        }
+        if (wparam == 'Z') {
+            undo_image();
+            return 0;
+        }
+        if (wparam == 'Y') {
+            redo_image();
             return 0;
         }
     }
@@ -279,6 +319,10 @@ const wchar_t* tool_name(Tool tool) {
         return L"Borracha";
     }
     return L"Ferramenta";
+}
+
+const wchar_t* brush_shape_name(BrushShape shape) {
+    return shape == BrushShape::Square ? L"Quadrado" : L"Redondo";
 }
 
 std::string read_file(const fs::path& path) {
@@ -494,6 +538,75 @@ void set_status(const std::wstring& message) {
     SetWindowTextW(g_status, message.c_str());
 }
 
+std::unique_ptr<Bitmap> clone_bitmap(Bitmap* source) {
+    if (!source) {
+        return nullptr;
+    }
+    Rect full(0, 0, static_cast<int>(source->GetWidth()), static_cast<int>(source->GetHeight()));
+    std::unique_ptr<Bitmap> copy(source->Clone(full, PixelFormat32bppARGB));
+    if (!copy || copy->GetLastStatus() != Gdiplus::Ok) {
+        return nullptr;
+    }
+    return copy;
+}
+
+void trim_history(std::vector<std::unique_ptr<Bitmap>>& stack) {
+    while (stack.size() > MAX_HISTORY) {
+        stack.erase(stack.begin());
+    }
+}
+
+void clear_history() {
+    g_app.undo_stack.clear();
+    g_app.redo_stack.clear();
+}
+
+void push_undo_snapshot() {
+    if (!g_app.image) {
+        return;
+    }
+    std::unique_ptr<Bitmap> snapshot = clone_bitmap(g_app.image.get());
+    if (!snapshot) {
+        set_status(L"Nao foi possivel criar snapshot de undo.");
+        return;
+    }
+    g_app.undo_stack.push_back(std::move(snapshot));
+    trim_history(g_app.undo_stack);
+    g_app.redo_stack.clear();
+}
+
+void undo_image() {
+    if (!g_app.image || g_app.undo_stack.empty()) {
+        set_status(L"Nada para desfazer.");
+        return;
+    }
+    std::unique_ptr<Bitmap> current = clone_bitmap(g_app.image.get());
+    if (current) {
+        g_app.redo_stack.push_back(std::move(current));
+        trim_history(g_app.redo_stack);
+    }
+    g_app.image = std::move(g_app.undo_stack.back());
+    g_app.undo_stack.pop_back();
+    InvalidateRect(g_main, nullptr, FALSE);
+    set_status(L"Ctrl+Z aplicado.");
+}
+
+void redo_image() {
+    if (!g_app.image || g_app.redo_stack.empty()) {
+        set_status(L"Nada para refazer.");
+        return;
+    }
+    std::unique_ptr<Bitmap> current = clone_bitmap(g_app.image.get());
+    if (current) {
+        g_app.undo_stack.push_back(std::move(current));
+        trim_history(g_app.undo_stack);
+    }
+    g_app.image = std::move(g_app.redo_stack.back());
+    g_app.redo_stack.pop_back();
+    InvalidateRect(g_main, nullptr, FALSE);
+    set_status(L"Ctrl+Y aplicado.");
+}
+
 void load_image(const fs::path& path, bool force = false) {
     std::error_code ignored;
     if (!force && !g_app.current_image_path.empty() && fs::equivalent(g_app.current_image_path, path, ignored)) {
@@ -517,6 +630,7 @@ void load_image(const fs::path& path, bool force = false) {
     g_app.zoom = 1.0;
     g_app.pan_x = 0;
     g_app.pan_y = 0;
+    clear_history();
     std::wstring size = std::to_wstring(g_app.image->GetWidth()) + L"x" + std::to_wstring(g_app.image->GetHeight());
     set_status(L"Imagem carregada: " + path.filename().wstring() + L" (" + size + L")");
     InvalidateRect(g_main, nullptr, FALSE);
@@ -936,6 +1050,16 @@ void fit_zoom() {
     InvalidateRect(g_main, nullptr, FALSE);
 }
 
+void fill_brush_stamp(Graphics& image_g, SolidBrush& brush, int center_x, int center_y, int size) {
+    int left = center_x - size / 2;
+    int top = center_y - size / 2;
+    if (g_app.brush_shape == BrushShape::Square) {
+        image_g.FillRectangle(&brush, left, top, size, size);
+    } else {
+        image_g.FillEllipse(&brush, left, top, size, size);
+    }
+}
+
 void paint_at(int screen_x, int screen_y) {
     POINT p = screen_to_image_point(screen_x, screen_y);
     if (!image_point_inside(p)) {
@@ -943,14 +1067,14 @@ void paint_at(int screen_x, int screen_y) {
     }
     g_app.brush_size = clamp_int(get_control_int(g_brush_size, g_app.brush_size), 1, 128);
     Graphics image_g(g_app.image.get());
-    image_g.SetSmoothingMode(Gdiplus::SmoothingModeNone);
+    image_g.SetSmoothingMode(g_app.brush_shape == BrushShape::Round ? Gdiplus::SmoothingModeAntiAlias : Gdiplus::SmoothingModeNone);
     image_g.SetCompositingMode(g_app.tool == Tool::Eraser ? CompositingModeSourceCopy : Gdiplus::CompositingModeSourceOver);
     Color color = g_app.tool == Tool::Eraser
         ? Color(0, 0, 0, 0)
         : Color(255, GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color));
     SolidBrush brush(color);
     int radius = std::max(1, g_app.brush_size);
-    image_g.FillRectangle(&brush, p.x - radius / 2, p.y - radius / 2, radius, radius);
+    fill_brush_stamp(image_g, brush, p.x, p.y, radius);
 
     Rect dirty = image_rect_to_screen_rect(p.x - radius, p.y - radius, radius * 2, radius * 2);
     RECT dirty_win = inflated_win_rect(dirty, 4);
@@ -970,7 +1094,7 @@ void paint_stroke(int from_x, int from_y, int to_x, int to_y, Tool tool) {
 
     g_app.brush_size = clamp_int(get_control_int(g_brush_size, g_app.brush_size), 1, 128);
     Graphics image_g(g_app.image.get());
-    image_g.SetSmoothingMode(Gdiplus::SmoothingModeNone);
+    image_g.SetSmoothingMode(g_app.brush_shape == BrushShape::Round ? Gdiplus::SmoothingModeAntiAlias : Gdiplus::SmoothingModeNone);
     image_g.SetCompositingMode(tool == Tool::Eraser ? CompositingModeSourceCopy : Gdiplus::CompositingModeSourceOver);
     Color color = tool == Tool::Eraser
         ? Color(0, 0, 0, 0)
@@ -995,7 +1119,7 @@ void paint_stroke(int from_x, int from_y, int to_x, int to_y, Tool tool) {
         }
         int left = px - radius / 2;
         int top = py - radius / 2;
-        image_g.FillRectangle(&brush, left, top, radius, radius);
+        fill_brush_stamp(image_g, brush, px, py, radius);
         dirty_left = std::min(dirty_left, left);
         dirty_top = std::min(dirty_top, top);
         dirty_right = std::max(dirty_right, left + radius);
@@ -1179,8 +1303,13 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
             int top = g_app.hover_mouse.y - size / 2;
             Pen outline(g_app.tool == Tool::Eraser ? Color(240, 255, 120, 120) : Color(240, 255, 255, 255), 1.5f);
             SolidBrush fill(g_app.tool == Tool::Eraser ? Color(55, 255, 80, 80) : Color(55, GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color)));
-            g.FillEllipse(&fill, left, top, size, size);
-            g.DrawEllipse(&outline, left, top, size, size);
+            if (g_app.brush_shape == BrushShape::Square) {
+                g.FillRectangle(&fill, left, top, size, size);
+                g.DrawRectangle(&outline, left, top, size, size);
+            } else {
+                g.FillEllipse(&fill, left, top, size, size);
+                g.DrawEllipse(&outline, left, top, size, size);
+            }
         }
     }
 
@@ -1261,7 +1390,7 @@ HWND make_button(HWND parent, const wchar_t* text, DWORD style, int id) {
 }
 
 void invalidate_tool_ui() {
-    HWND buttons[] = {g_select_tool, g_pencil_tool, g_eraser_tool, g_color_pick, g_tool_preview};
+    HWND buttons[] = {g_select_tool, g_pencil_tool, g_eraser_tool, g_color_pick, g_tool_preview, g_shape_round, g_shape_square};
     for (HWND hwnd : buttons) {
         if (hwnd) {
             InvalidateRect(hwnd, nullptr, TRUE);
@@ -1270,8 +1399,13 @@ void invalidate_tool_ui() {
 }
 
 bool is_checked_button(int id) {
+    if (id == ID_SHAPE_ROUND || id == ID_SHAPE_SQUARE) {
+        HWND button = id == ID_SHAPE_ROUND ? g_shape_round : g_shape_square;
+        return button && SendMessageW(button, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
     if (id == ID_DEV || id == ID_SHOW_ALL || id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER) {
-        return SendMessageW(GetDlgItem(g_main, id), BM_GETCHECK, 0, 0) == BST_CHECKED;
+        HWND button = GetDlgItem(g_main, id);
+        return button && SendMessageW(button, BM_GETCHECK, 0, 0) == BST_CHECKED;
     }
     return false;
 }
@@ -1491,7 +1625,7 @@ void draw_tool_preview(const DRAWITEMSTRUCT* item) {
     meta.top += 30;
     meta.bottom = meta.top + 18;
     SetTextColor(item->hDC, RGB(166, 166, 170));
-    std::wstring brush_meta = L"Brush " + std::to_wstring(g_app.brush_size) + L"px";
+    std::wstring brush_meta = L"Brush " + std::to_wstring(g_app.brush_size) + L"px  " + brush_shape_name(g_app.brush_shape);
     DrawTextW(item->hDC, brush_meta.c_str(), -1, &meta, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     RECT color_swatch{r.right - 40, r.top + 12, r.right - 16, r.top + 36};
@@ -1515,13 +1649,21 @@ void draw_tool_preview(const DRAWITEMSTRUCT* item) {
     if (g_app.tool == Tool::Eraser) {
         HBRUSH eraser = CreateSolidBrush(RGB(25, 32, 42));
         HGDIOBJ old_b = SelectObject(item->hDC, eraser);
-        Rectangle(item->hDC, cx - preview_radius, cy - preview_radius, cx + preview_radius, cy + preview_radius);
+        if (g_app.brush_shape == BrushShape::Square) {
+            Rectangle(item->hDC, cx - preview_radius, cy - preview_radius, cx + preview_radius, cy + preview_radius);
+        } else {
+            Ellipse(item->hDC, cx - preview_radius, cy - preview_radius, cx + preview_radius, cy + preview_radius);
+        }
         SelectObject(item->hDC, old_b);
         DeleteObject(eraser);
     } else if (g_app.tool == Tool::Pencil) {
         HBRUSH brush = CreateSolidBrush(g_app.brush_color);
         HGDIOBJ old_b = SelectObject(item->hDC, brush);
-        Ellipse(item->hDC, cx - preview_radius, cy - preview_radius, cx + preview_radius, cy + preview_radius);
+        if (g_app.brush_shape == BrushShape::Square) {
+            Rectangle(item->hDC, cx - preview_radius, cy - preview_radius, cx + preview_radius, cy + preview_radius);
+        } else {
+            Ellipse(item->hDC, cx - preview_radius, cy - preview_radius, cx + preview_radius, cy + preview_radius);
+        }
         SelectObject(item->hDC, old_b);
         DeleteObject(brush);
     } else {
@@ -1539,28 +1681,140 @@ void draw_tool_preview(const DRAWITEMSTRUCT* item) {
     hint.right -= 10;
     hint.bottom -= 8;
     SetTextColor(item->hDC, RGB(177, 186, 201));
-    DrawTextW(item->hDC, L"Botao direito: borracha rapida\nCtrl + roda: zoom\nMeio/Alt+direito: mover", -1, &hint, DT_LEFT | DT_WORDBREAK);
+    DrawTextW(item->hDC, L"Botao direito: opcoes\nCtrl+Z / Ctrl+Y\nCtrl + roda: zoom", -1, &hint, DT_LEFT | DT_WORDBREAK);
+}
+
+void sync_options_controls() {
+    if (g_options_size) {
+        set_control_int_if_changed(g_options_size, g_app.brush_size);
+    }
+    if (g_options_hardness) {
+        set_control_int_if_changed(g_options_hardness, g_app.brush_hardness);
+    }
+    if (g_shape_round) {
+        SendMessageW(g_shape_round, BM_SETCHECK, g_app.brush_shape == BrushShape::Round ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    if (g_shape_square) {
+        SendMessageW(g_shape_square, BM_SETCHECK, g_app.brush_shape == BrushShape::Square ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    invalidate_tool_ui();
+}
+
+void draw_options_panel(HWND hwnd, HDC dc) {
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    HBRUSH bg = CreateSolidBrush(RGB(34, 36, 40));
+    FillRect(dc, &client, bg);
+    DeleteObject(bg);
+
+    HPEN border = CreatePen(PS_SOLID, 1, RGB(76, 80, 88));
+    HGDIOBJ old_pen = SelectObject(dc, border);
+    HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    RoundRect(dc, 0, 0, client.right, client.bottom, 8, 8);
+    SelectObject(dc, old_brush);
+    SelectObject(dc, old_pen);
+    DeleteObject(border);
+
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(238, 241, 245));
+    if (g_ui_font) {
+        SelectObject(dc, g_ui_font);
+    }
+
+    RECT title{132, 10, client.right - 12, 32};
+    std::wstring title_text = std::wstring(g_app.tool == Tool::Eraser ? L"Borracha" : L"Lapis") + L" profissional";
+    DrawTextW(dc, title_text.c_str(), -1, &title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT preview{18, 18, 116, 116};
+    HBRUSH preview_bg = CreateSolidBrush(RGB(50, 53, 58));
+    FillRect(dc, &preview, preview_bg);
+    DeleteObject(preview_bg);
+
+    HPEN guide = CreatePen(PS_SOLID, 1, RGB(130, 134, 140));
+    HGDIOBJ guide_old = SelectObject(dc, guide);
+    int cx = (preview.left + preview.right) / 2;
+    int cy = (preview.top + preview.bottom) / 2;
+    Ellipse(dc, preview.left + 9, preview.top + 9, preview.right - 9, preview.bottom - 9);
+    MoveToEx(dc, preview.left + 18, cy, nullptr);
+    LineTo(dc, preview.right - 18, cy);
+    MoveToEx(dc, cx, preview.top + 18, nullptr);
+    LineTo(dc, cx, preview.bottom - 18);
+    SelectObject(dc, guide_old);
+    DeleteObject(guide);
+
+    int preview_size = clamp_int(g_app.brush_size, 4, 34);
+    HBRUSH stamp = CreateSolidBrush(g_app.tool == Tool::Eraser ? RGB(210, 214, 220) : g_app.brush_color);
+    HGDIOBJ stamp_old = SelectObject(dc, stamp);
+    if (g_app.brush_shape == BrushShape::Square) {
+        Rectangle(dc, cx - preview_size / 2, cy - preview_size / 2, cx + preview_size / 2, cy + preview_size / 2);
+    } else {
+        Ellipse(dc, cx - preview_size / 2, cy - preview_size / 2, cx + preview_size / 2, cy + preview_size / 2);
+    }
+    SelectObject(dc, stamp_old);
+    DeleteObject(stamp);
+
+    SetTextColor(dc, RGB(210, 214, 220));
+    RECT size_label{132, 42, 210, 62};
+    RECT hard_label{132, 88, 210, 108};
+    DrawTextW(dc, L"Tamanho:", -1, &size_label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(dc, L"Dureza:", -1, &hard_label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    HPEN slider = CreatePen(PS_SOLID, 2, RGB(92, 96, 104));
+    HGDIOBJ slider_old = SelectObject(dc, slider);
+    MoveToEx(dc, 132, 70, nullptr);
+    LineTo(dc, 300, 70);
+    MoveToEx(dc, 132, 116, nullptr);
+    LineTo(dc, 300, 116);
+    SelectObject(dc, slider_old);
+    DeleteObject(slider);
+
+    HPEN active = CreatePen(PS_SOLID, 3, RGB(0, 158, 205));
+    HGDIOBJ active_old = SelectObject(dc, active);
+    int size_pos = 132 + clamp_int(g_app.brush_size, 1, 128) * 168 / 128;
+    int hard_pos = 132 + clamp_int(g_app.brush_hardness, 1, 100) * 168 / 100;
+    MoveToEx(dc, 132, 70, nullptr);
+    LineTo(dc, size_pos, 70);
+    MoveToEx(dc, 132, 116, nullptr);
+    LineTo(dc, hard_pos, 116);
+    SelectObject(dc, active_old);
+    DeleteObject(active);
+
+    SetTextColor(dc, RGB(186, 192, 202));
+    RECT shape_label{18, 130, 120, 150};
+    DrawTextW(dc, L"Formato", -1, &shape_label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
 LRESULT CALLBACK options_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_CREATE: {
-        HWND title = CreateWindowExW(0, L"STATIC", L"Opcoes da ferramenta", WS_CHILD | WS_VISIBLE, 16, 14, 220, 24, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        HWND label = CreateWindowExW(0, L"STATIC", L"Pincel / Borracha", WS_CHILD | WS_VISIBLE, 16, 52, 120, 22, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        HWND brush = CreateWindowExW(0, L"EDIT", std::to_wstring(g_app.brush_size).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER, 150, 50, 80, 24, hwnd, reinterpret_cast<HMENU>(ID_OPTIONS), GetModuleHandleW(nullptr), nullptr);
-        HWND hint = CreateWindowExW(0, L"STATIC", L"Botao direito sempre usa borracha rapida.", WS_CHILD | WS_VISIBLE, 16, 88, 300, 22, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        HWND color = CreateWindowExW(0, L"BUTTON", L"Cor do lapis", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 16, 122, 132, 30, hwnd, reinterpret_cast<HMENU>(ID_COLOR_PICK), GetModuleHandleW(nullptr), nullptr);
-        HWND close = CreateWindowExW(0, L"BUTTON", L"Fechar", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 210, 122, 90, 30, hwnd, reinterpret_cast<HMENU>(ID_OPTIONS_CLOSE), GetModuleHandleW(nullptr), nullptr);
+        g_options_size = CreateWindowExW(0, L"EDIT", std::to_wstring(g_app.brush_size).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER, 246, 34, 58, 26, hwnd, reinterpret_cast<HMENU>(ID_OPTIONS), GetModuleHandleW(nullptr), nullptr);
+        g_options_hardness = CreateWindowExW(0, L"EDIT", std::to_wstring(g_app.brush_hardness).c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER, 246, 80, 58, 26, hwnd, reinterpret_cast<HMENU>(ID_HARDNESS), GetModuleHandleW(nullptr), nullptr);
+        g_shape_round = CreateWindowExW(0, L"BUTTON", L"Redondo", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | BS_OWNERDRAW, 18, 154, 92, 30, hwnd, reinterpret_cast<HMENU>(ID_SHAPE_ROUND), GetModuleHandleW(nullptr), nullptr);
+        g_shape_square = CreateWindowExW(0, L"BUTTON", L"Quadrado", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | BS_OWNERDRAW, 118, 154, 98, 30, hwnd, reinterpret_cast<HMENU>(ID_SHAPE_SQUARE), GetModuleHandleW(nullptr), nullptr);
+        HWND color = CreateWindowExW(0, L"BUTTON", L"Cor", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 226, 154, 78, 30, hwnd, reinterpret_cast<HMENU>(ID_COLOR_PICK), GetModuleHandleW(nullptr), nullptr);
+        HWND close = CreateWindowExW(0, L"BUTTON", L"Fechar", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 312, 154, 76, 30, hwnd, reinterpret_cast<HMENU>(ID_OPTIONS_CLOSE), GetModuleHandleW(nullptr), nullptr);
         if (g_ui_font) {
-            SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
-            SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
-            SendMessageW(brush, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
-            SendMessageW(hint, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
+            SendMessageW(g_options_size, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
+            SendMessageW(g_options_hardness, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
+            SendMessageW(g_shape_round, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
+            SendMessageW(g_shape_square, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
             SendMessageW(color, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
             SendMessageW(close, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
         }
+        subclass_edit(g_options_size);
+        subclass_edit(g_options_hardness);
+        sync_options_controls();
         return 0;
     }
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        draw_options_panel(hwnd, dc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
     case WM_DRAWITEM:
         draw_owner_button(reinterpret_cast<DRAWITEMSTRUCT*>(lparam));
         return TRUE;
@@ -1574,11 +1828,28 @@ LRESULT CALLBACK options_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
     case WM_COMMAND:
         if (LOWORD(wparam) == ID_OPTIONS && HIWORD(wparam) == EN_CHANGE) {
             g_app.brush_size = clamp_int(get_control_int(reinterpret_cast<HWND>(lparam), g_app.brush_size), 1, 128);
-            set_control_int(g_brush_size, g_app.brush_size);
+            set_control_int_if_changed(g_brush_size, g_app.brush_size);
             invalidate_tool_ui();
+            InvalidateRect(hwnd, nullptr, FALSE);
             set_status(L"Tamanho do pincel atualizado.");
+        } else if (LOWORD(wparam) == ID_HARDNESS && HIWORD(wparam) == EN_CHANGE) {
+            g_app.brush_hardness = clamp_int(get_control_int(reinterpret_cast<HWND>(lparam), g_app.brush_hardness), 1, 100);
+            invalidate_tool_ui();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            set_status(L"Dureza do pincel atualizada.");
+        } else if (LOWORD(wparam) == ID_SHAPE_ROUND) {
+            g_app.brush_shape = BrushShape::Round;
+            sync_options_controls();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            set_status(L"Pincel redondo selecionado.");
+        } else if (LOWORD(wparam) == ID_SHAPE_SQUARE) {
+            g_app.brush_shape = BrushShape::Square;
+            sync_options_controls();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            set_status(L"Pincel quadrado selecionado.");
         } else if (LOWORD(wparam) == ID_COLOR_PICK) {
             choose_brush_color(hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
         } else if (LOWORD(wparam) == ID_OPTIONS_CLOSE) {
             DestroyWindow(hwnd);
         }
@@ -1588,16 +1859,25 @@ LRESULT CALLBACK options_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
         return 0;
     case WM_DESTROY:
         g_options_window = nullptr;
+        g_options_size = nullptr;
+        g_options_hardness = nullptr;
+        g_shape_round = nullptr;
+        g_shape_square = nullptr;
         return 0;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
-void show_options_window() {
-    if (g_options_window) {
+void show_options_window(POINT screen_pos = POINT{-1, -1}) {
+    if (g_options_window && IsWindow(g_options_window)) {
+        sync_options_controls();
+        if (screen_pos.x >= 0 && screen_pos.y >= 0) {
+            SetWindowPos(g_options_window, HWND_TOPMOST, screen_pos.x, screen_pos.y, 0, 0, SWP_NOSIZE);
+        }
         SetForegroundWindow(g_options_window);
         return;
     }
+    g_options_window = nullptr;
     WNDCLASSW wc = {};
     wc.lpfnWndProc = options_proc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -1605,8 +1885,16 @@ void show_options_window() {
     wc.hbrBackground = g_panel_brush;
     wc.lpszClassName = L"TeeworldsTextureEditorOptions";
     RegisterClassW(&wc);
-    g_options_window = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"Opcoes - Teeworlds Texture Editor", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 340, 210, g_main, nullptr, GetModuleHandleW(nullptr), nullptr);
+    int x = screen_pos.x >= 0 ? screen_pos.x : CW_USEDEFAULT;
+    int y = screen_pos.y >= 0 ? screen_pos.y : CW_USEDEFAULT;
+    g_options_window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, wc.lpszClassName, L"Opcoes - Teeworlds Texture Editor", WS_POPUP, x, y, 410, 210, g_main, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!g_options_window) {
+        set_status(L"Falha ao abrir painel de opcoes. Erro: " + std::to_wstring(GetLastError()));
+        return;
+    }
     ShowWindow(g_options_window, SW_SHOW);
+    UpdateWindow(g_options_window);
+    SetForegroundWindow(g_options_window);
 }
 
 void choose_brush_color(HWND owner) {
@@ -1672,7 +1960,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_y = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_NUMBER, 0);
         g_w = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_NUMBER, 0);
         g_h = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_NUMBER, 0);
-        g_brush_size = make_child(hwnd, L"EDIT", L"8", WS_BORDER | ES_NUMBER, 0);
+        g_brush_size = make_child(hwnd, L"EDIT", L"8", WS_BORDER | ES_NUMBER, ID_BRUSH_SIZE);
         g_tool_preview = make_child(hwnd, L"STATIC", L"", SS_OWNERDRAW, ID_TOOL_PREVIEW);
         g_apply = make_button(hwnd, L"Aplicar parte", BS_PUSHBUTTON, ID_APPLY);
         g_new_part = make_button(hwnd, L"Nova parte", BS_PUSHBUTTON, ID_NEW);
@@ -1715,11 +2003,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (g_app.tool == Tool::Select) {
             select_part_from_point(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
         } else {
+            push_undo_snapshot();
             g_app.drawing = true;
             g_app.last_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             SetCapture(hwnd);
             paint_stroke(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), g_app.tool);
-            UpdateWindow(hwnd);
         }
         return 0;
     case WM_LBUTTONUP:
@@ -1735,25 +2023,15 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             g_app.last_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             SetCapture(hwnd);
         } else {
-            g_app.right_erasing = true;
-            Tool previous = g_app.tool;
-            g_app.tool = Tool::Eraser;
-            g_app.last_mouse = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-            SetCapture(hwnd);
-            paint_stroke(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), Tool::Eraser);
-            g_app.tool = previous;
-            UpdateWindow(hwnd);
+            POINT screen_pos{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            ClientToScreen(hwnd, &screen_pos);
+            show_options_window(screen_pos);
         }
         return 0;
     case WM_RBUTTONUP:
         if (g_app.panning) {
             g_app.panning = false;
             ReleaseCapture();
-        }
-        if (g_app.right_erasing) {
-            g_app.right_erasing = false;
-            ReleaseCapture();
-            set_status(L"Borracha rapida aplicada. Use Salvar PNG para exportar.");
         }
         return 0;
     case WM_MBUTTONDOWN:
@@ -1785,12 +2063,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             TrackMouseEvent(&event);
             g_app.tracking_mouse = true;
         }
-        if (g_app.drawing || g_app.right_erasing) {
+        if (g_app.drawing) {
             int x = GET_X_LPARAM(lparam);
             int y = GET_Y_LPARAM(lparam);
-            paint_stroke(g_app.last_mouse.x, g_app.last_mouse.y, x, y, g_app.right_erasing ? Tool::Eraser : g_app.tool);
+            paint_stroke(g_app.last_mouse.x, g_app.last_mouse.y, x, y, g_app.tool);
             g_app.last_mouse = {x, y};
-            UpdateWindow(hwnd);
         } else if (g_app.panning) {
             int x = GET_X_LPARAM(lparam);
             int y = GET_Y_LPARAM(lparam);
@@ -1829,8 +2106,29 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             return 0;
         }
         return 0;
+    case WM_KEYDOWN:
+        if (GetKeyState(VK_CONTROL) & 0x8000) {
+            if (wparam == 'Z') {
+                undo_image();
+                return 0;
+            }
+            if (wparam == 'Y') {
+                redo_image();
+                return 0;
+            }
+        }
+        break;
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
+        case ID_BRUSH_SIZE:
+            if (HIWORD(wparam) == EN_CHANGE) {
+                g_app.brush_size = clamp_int(get_control_int(g_brush_size, g_app.brush_size), 1, 128);
+                if (g_options_size) {
+                    set_control_int_if_changed(g_options_size, g_app.brush_size);
+                }
+                invalidate_tool_ui();
+            }
+            return 0;
         case ID_TEMPLATES:
             if (HIWORD(wparam) == LBN_SELCHANGE) {
                 int next_template = static_cast<int>(SendMessageW(g_templates, LB_GETCURSEL, 0, 0));
@@ -1977,6 +2275,16 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0)) {
+        if (msg.message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            if (msg.wParam == 'Z') {
+                undo_image();
+                continue;
+            }
+            if (msg.wParam == 'Y') {
+                redo_image();
+                continue;
+            }
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
