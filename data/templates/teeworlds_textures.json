@@ -8,13 +8,23 @@
       "width": 1024,
       "height": 512,
       "parts": [
-        { "id": "hook", "label": "Hook", "x": 62, "y": 0, "w": 105, "h": 36 },
-        { "id": "hammer", "label": "Hammer", "x": 63, "y": 36, "w": 130, "h": 90 },
-        { "id": "gun", "label": "Gun", "x": 65, "y": 122, "w": 136, "h": 70 },
-        { "id": "shotgun", "label": "Shotgun", "x": 60, "y": 190, "w": 240, "h": 67 },
-        { "id": "grenade", "label": "Grenade Launcher", "x": 65, "y": 252, "w": 220, "h": 72 },
-        { "id": "laser", "label": "Laser Rifle", "x": 65, "y": 385, "w": 220, "h": 90 },
-        { "id": "ninja", "label": "Ninja Sword", "x": 110, "y": 325, "w": 210, "h": 60 }
+        { "id": "Hook_Copy", "label": "Hook Copy", "x": 64, "y": 0, "w": 32, "h": 32 },
+        { "id": "Hook_Point", "label": "Hook Point", "x": 96, "y": 0, "w": 80, "h": 32 },
+        { "id": "hammer", "label": "Hammer", "x": 64, "y": 32, "w": 128, "h": 96 },
+        { "id": "gun", "label": "Gun", "x": 64, "y": 128, "w": 128, "h": 64 },
+        { "id": "shotgun", "label": "Shotgun", "x": 64, "y": 192, "w": 256, "h": 64 },
+        { "id": "grenade", "label": "Grenade Launcher", "x": 64, "y": 256, "w": 256, "h": 64 },
+        { "id": "ninja", "label": "Ninja Sword", "x": 64, "y": 320, "w": 256, "h": 64 },
+        { "id": "laser", "label": "Laser Rifle", "x": 64, "y": 384, "w": 224, "h": 96 },
+        { "id": "Aim_Hook", "label": "Aim Hook", "x": 0, "y": 0, "w": 64, "h": 64 },
+        { "id": "Aim_Pistol", "label": "Aim Pistol", "x": 0, "y": 128, "w": 64, "h": 64 },
+        { "id": "Aim_Shotgun", "label": "Aim Shotgun", "x": 0, "y": 192, "w": 64, "h": 64 },
+        { "id": "Aim_Rocket", "label": "Aim Rocket", "x": 0, "y": 256, "w": 64, "h": 64 },
+        { "id": "Aim_Ninja", "label": "Aim Ninja", "x": 0, "y": 320, "w": 64, "h": 64 },
+        { "id": "Aim_Laser", "label": "Aim Laser", "x": 0, "y": 384, "w": 64, "h": 64 },
+        { "id": "Bullet_Rocket", "label": "Bullet Rocket", "x": 320, "y": 256, "w": 64, "h": 64 },
+        { "id": "Bullet_Shotgun", "label": "Bullet Shotgun", "x": 320, "y": 192, "w": 64, "h": 64 },
+        { "id": "Bullet_Pistol", "label": "Bullet Pistol", "x": 192, "y": 128, "w": 64, "h": 64 }
       ]
     },
     {
@@ -43,7 +53,8 @@
         { "id": "jump On", "label": "Jump On Icon", "x": 0, "y": 0, "w": 64, "h": 64 },
         { "id": "Jump Off", "label": "Jump Off Icon", "x": 64, "y": 0, "w": 64, "h": 64 },
         { "id": "Solo", "label": "Solo Icon", "x": 128, "y": 0, "w": 64, "h": 64 },
-        { "id": "No Colision", "label": "No Colision Icon", "x": 192, "y": 0, "w": 64, "h": 64 }
+        { "id": "No Colision", "label": "No Colision Icon", "x": 192, "y": 0, "w": 64, "h": 64 },
+        { "id": "Infjump", "label": "Infinite Jump", "x": 256, "y": 0, "w": 64, "h": 64 }
       ]
     },
     {

@@ -31,7 +31,8 @@ Em resumo: um editor para parar de procurar sprite no pixel errado como se fosse
 - Loop de UI em 120 FPS quando ativo e 30 FPS quando minimizado para economizar CPU.
 - Desenho, borracha e balde respeitam a `part` selecionada; sem parte selecionada, edita a imagem inteira.
 - Undo/redo com ate 400 snapshots via `Ctrl + Z` e `Ctrl + Y`.
-- Agente `Genus` no modo-dev, salvando pedidos de treino em `IA-TRAIN/`.
+- Agente `Genus` no modo-dev, salvando pedidos/receitas em `IA-TRAIN/` e tentando executar comandos.
+- Icones de ferramentas carregados de `icons/icons.png` em grade.
 - Copyright e metadados Windows no executavel: `Lex copyright 2026`.
 - Icone customizavel por `.ico` no build.
 - Copia automatica das DLLs do MinGW ao lado do `.exe`.
@@ -121,7 +122,10 @@ Ao abrir `build\tte.exe`:
 - use `Pincel` para controlar o tamanho do lapis/borracha;
 - clique em `Aplicar parte` para atualizar a selecao;
 - use `Subir` e `Descer` no modo-dev para mudar a ordem das partes;
-- digite um pedido no campo do `Genus` e clique em `Treinar` para salvar um exemplo em `IA-TRAIN/genus-training.jsonl`;
+- digite um pedido no campo do `Genus`;
+- escreva a receita/acoes no campo abaixo, ou deixe vazio para salvar o estado atual da ferramenta;
+- clique em `Treinar` para salvar em `IA-TRAIN/genus-training.jsonl`;
+- clique em `Tentar` para o Genus procurar um treino parecido e executar;
 - clique em `Salvar JSON` para gravar em `data/templates/teeworlds_textures.json`.
 - clique em `Salvar PNG` para exportar a textura editada.
 
@@ -216,6 +220,32 @@ Elas ficam ao lado de `tte.exe`, entao o usuario nao precisa instalar o MSYS2 pa
 ## Futuro da IA
 
 O agente do editor se chama `Genus`. Na 0.1, ele registra pedidos de treino em `IA-TRAIN/genus-training.jsonl`, incluindo template, parte selecionada e ferramenta ativa.
+
+Ele tambem entende receitas simples:
+
+```text
+part Hook_Copy
+tool bucket
+color #00AAFF
+tolerance 25
+fill
+```
+
+Comandos disponiveis: `template`, `part`, `whole`, `tool`, `size`, `opacity`, `tolerance`, `hardness`, `shape`, `color`, `fill` e `clear`.
+
+Se nao existir treino parecido, o Genus tenta interpretar o pedido direto. Exemplo: `preencher hook com #00AAFF confianca 25`.
+
+## Icones das ferramentas
+
+O editor procura `icons/icons.png` e recorta os icones em grade. O arquivo atual usa uma grade visual 4x4; cada celula e desenhada como icone 64x64 na interface.
+
+Mapeamento inicial:
+
+- `Selecionar`: linha 2, coluna 3.
+- `Lapis`: linha 1, coluna 1.
+- `Borracha`: linha 1, coluna 2.
+- `Balde`: linha 1, coluna 3.
+- `Zoom`: linha 2, coluna 4.
 
 A ideia e evoluir o Genus para:
 

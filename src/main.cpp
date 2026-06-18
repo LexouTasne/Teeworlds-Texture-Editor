@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cctype>
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
@@ -21,6 +22,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -125,7 +127,9 @@ HWND g_part_up = nullptr;
 HWND g_part_down = nullptr;
 HWND g_save = nullptr;
 HWND g_ai_prompt = nullptr;
+HWND g_ai_steps = nullptr;
 HWND g_ai_train = nullptr;
+HWND g_ai_run = nullptr;
 HWND g_open = nullptr;
 HWND g_save_png = nullptr;
 HWND g_reset = nullptr;
@@ -163,6 +167,8 @@ HWND g_opacity_minus = nullptr;
 HWND g_opacity_plus = nullptr;
 HWND g_tolerance_minus = nullptr;
 HWND g_tolerance_plus = nullptr;
+std::unique_ptr<Bitmap> g_icon_sheet;
+int g_icon_cell = 0;
 
 constexpr int ID_TEMPLATES = 1001;
 constexpr int ID_PARTS = 1002;
@@ -205,6 +211,8 @@ constexpr int ID_TOLERANCE_PLUS = 1038;
 constexpr int ID_FRAME_TIMER = 2000;
 constexpr int ID_AI_PROMPT = 2100;
 constexpr int ID_AI_TRAIN = 2101;
+constexpr int ID_AI_STEPS = 2102;
+constexpr int ID_AI_RUN = 2103;
 
 constexpr size_t MAX_HISTORY = 400;
 constexpr UINT ACTIVE_FRAME_MS = 8;
@@ -227,6 +235,13 @@ void populate_dev_fields();
 void close_tool_panel();
 void set_status(const std::wstring& message);
 void layout_tool_panel_controls(HWND hwnd);
+void sync_options_controls();
+void bucket_fill_at(int screen_x, int screen_y);
+Rect image_rect_to_screen_rect(int x, int y, int w, int h);
+Rect editable_source_rect();
+void set_tool(Tool tool);
+void rebuild_parts();
+void load_default_image(bool force);
 
 std::wstring widen(const std::string& text) {
     if (text.empty()) {
@@ -576,10 +591,56 @@ std::string escape_json(const std::string& value) {
     for (char c : value) {
         if (c == '"' || c == '\\') {
             out.push_back('\\');
+        } else if (c == '\n') {
+            out += "\\n";
+            continue;
+        } else if (c == '\r') {
+            continue;
         }
         out.push_back(c);
     }
     return out;
+}
+
+std::string unescape_json_string(std::string value) {
+    std::string out;
+    bool escaped = false;
+    for (char c : value) {
+        if (escaped) {
+            if (c == 'n') {
+                out.push_back('\n');
+            } else {
+                out.push_back(c);
+            }
+            escaped = false;
+        } else if (c == '\\') {
+            escaped = true;
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+std::string lower_ascii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+std::string normalize_text(std::string value) {
+    value = lower_ascii(value);
+    for (char& c : value) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '#') {
+            c = ' ';
+        }
+    }
+    return value;
+}
+
+bool contains_norm(const std::string& text, const std::string& needle) {
+    return normalize_text(text).find(normalize_text(needle)) != std::string::npos;
 }
 
 std::string serialize_templates(const std::vector<TextureTemplate>& templates) {
@@ -646,6 +707,63 @@ void disable_high_resolution_timer() {
         timeEndPeriod(1);
         g_timer_resolution_enabled = false;
     }
+}
+
+void load_tool_icon_sheet() {
+    fs::path sheet = g_app.root / "icons" / "icons.png";
+    if (!fs::exists(sheet)) {
+        return;
+    }
+    std::unique_ptr<Bitmap> loaded(Bitmap::FromFile(sheet.wstring().c_str()));
+    if (!loaded || loaded->GetLastStatus() != Gdiplus::Ok) {
+        return;
+    }
+    g_icon_cell = std::max(64, static_cast<int>(loaded->GetWidth()) / 4);
+    g_icon_sheet = std::move(loaded);
+}
+
+bool icon_cell_for_button(int id, int& col, int& row) {
+    switch (id) {
+    case ID_TOOL_PENCIL:
+        col = 0; row = 0; return true;
+    case ID_TOOL_ERASER:
+        col = 1; row = 0; return true;
+    case ID_TOOL_BUCKET:
+        col = 2; row = 0; return true;
+    case ID_TOOL_SELECT:
+        col = 2; row = 1; return true;
+    case ID_ZOOM_IN:
+    case ID_ZOOM_OUT:
+        col = 3; row = 1; return true;
+    default:
+        return false;
+    }
+}
+
+bool draw_sheet_icon(HDC dc, int id, RECT r) {
+    if (!g_icon_sheet || g_icon_cell <= 0) {
+        return false;
+    }
+    int col = 0;
+    int row = 0;
+    if (!icon_cell_for_button(id, col, row)) {
+        return false;
+    }
+    int sx = col * g_icon_cell;
+    int sy = row * g_icon_cell;
+    if (sx + g_icon_cell > static_cast<int>(g_icon_sheet->GetWidth()) || sy + g_icon_cell > static_cast<int>(g_icon_sheet->GetHeight())) {
+        return false;
+    }
+    int w = r.right - r.left;
+    int h = r.bottom - r.top;
+    int size = std::max(18, std::min(w, h) - 12);
+    int x = r.left + (w - size) / 2;
+    int y = r.top + (h - size) / 2;
+    Graphics g(dc);
+    g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    g.DrawImage(g_icon_sheet.get(), Rect(x, y, size, size), sx, sy, g_icon_cell, g_icon_cell, Gdiplus::UnitPixel);
+    return true;
 }
 
 int active_tool_opacity() {
@@ -896,11 +1014,326 @@ void save_templates() {
     set_status(L"JSON salvo em data/templates/teeworlds_textures.json");
 }
 
+int find_template_index_by_text(const std::string& text) {
+    std::string norm = normalize_text(text);
+    for (size_t i = 0; i < g_app.templates.size(); ++i) {
+        const TextureTemplate& texture = g_app.templates[i];
+        if (norm.find(normalize_text(texture.id)) != std::string::npos
+            || norm.find(normalize_text(texture.name)) != std::string::npos) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+int find_part_index_by_text(const std::string& text) {
+    TextureTemplate* texture = current_template();
+    if (!texture) {
+        return -1;
+    }
+    std::string norm = normalize_text(text);
+    for (size_t i = 0; i < texture->parts.size(); ++i) {
+        const Part& part = texture->parts[i];
+        if (norm.find(normalize_text(part.id)) != std::string::npos
+            || norm.find(normalize_text(part.label)) != std::string::npos) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+COLORREF parse_hex_color(const std::string& text, COLORREF fallback) {
+    std::regex hex(R"(#([0-9a-fA-F]{6}))");
+    std::smatch match;
+    if (!std::regex_search(text, match, hex)) {
+        return fallback;
+    }
+    std::string value = match[1].str();
+    int r = std::stoi(value.substr(0, 2), nullptr, 16);
+    int g = std::stoi(value.substr(2, 2), nullptr, 16);
+    int b = std::stoi(value.substr(4, 2), nullptr, 16);
+    return RGB(r, g, b);
+}
+
+int number_after_any(const std::string& text, const std::vector<std::string>& keys, int fallback) {
+    std::string norm = normalize_text(text);
+    for (const std::string& key : keys) {
+        std::regex pattern(normalize_text(key) + R"(\s+(\d+))");
+        std::smatch match;
+        if (std::regex_search(norm, match, pattern)) {
+            return std::stoi(match[1].str());
+        }
+    }
+    return fallback;
+}
+
+std::string recipe_from_current_state() {
+    std::ostringstream recipe;
+    if (TextureTemplate* texture = current_template()) {
+        recipe << "template " << texture->id << "\n";
+    }
+    if (Part* part = current_part()) {
+        recipe << "part " << part->id << "\n";
+    } else {
+        recipe << "whole\n";
+    }
+    recipe << "tool " << narrow(tool_name(g_app.tool)) << "\n";
+    recipe << "size " << g_app.brush_size << "\n";
+    recipe << "hardness " << g_app.brush_hardness << "\n";
+    recipe << "opacity " << active_tool_opacity() << "\n";
+    recipe << "tolerance " << g_app.bucket_tolerance << "\n";
+    recipe << "shape " << (g_app.brush_shape == BrushShape::Square ? "square" : "round") << "\n";
+    wchar_t color[16] = {};
+    swprintf_s(color, L"#%02X%02X%02X", GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color));
+    recipe << "color " << narrow(color) << "\n";
+    return recipe.str();
+}
+
+void sync_tool_controls_after_ai() {
+    set_control_int_if_changed(g_brush_size, g_app.brush_size);
+    sync_options_controls();
+    populate_dev_fields();
+    invalidate_tool_ui();
+    InvalidateRect(g_main, nullptr, FALSE);
+}
+
+POINT editable_center_screen_point() {
+    Rect edit = editable_source_rect();
+    int cx = edit.X + edit.Width / 2;
+    int cy = edit.Y + edit.Height / 2;
+    Rect screen = image_rect_to_screen_rect(cx, cy, 1, 1);
+    return POINT{screen.X, screen.Y};
+}
+
+void clear_editable_area() {
+    if (!g_app.image) {
+        return;
+    }
+    Rect edit = editable_source_rect();
+    Graphics image_g(g_app.image.get());
+    image_g.SetClip(edit);
+    image_g.SetCompositingMode(CompositingModeSourceCopy);
+    SolidBrush transparent(Color(0, 0, 0, 0));
+    image_g.FillRectangle(&transparent, edit);
+    InvalidateRect(g_main, nullptr, FALSE);
+}
+
+std::vector<std::string> split_recipe_lines(std::string recipe) {
+    std::replace(recipe.begin(), recipe.end(), ';', '\n');
+    std::vector<std::string> lines;
+    std::istringstream in(recipe);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!normalize_text(line).empty()) {
+            lines.push_back(line);
+        }
+    }
+    return lines;
+}
+
+std::string builtin_recipe_from_prompt(const std::string& prompt) {
+    std::ostringstream recipe;
+    int template_index = find_template_index_by_text(prompt);
+    if (template_index >= 0) {
+        recipe << "template " << g_app.templates[template_index].id << "\n";
+    }
+    int part_index = find_part_index_by_text(prompt);
+    if (part_index >= 0 && current_template()) {
+        recipe << "part " << current_template()->parts[part_index].id << "\n";
+    } else if (contains_norm(prompt, "imagem inteira") || contains_norm(prompt, "template todo") || contains_norm(prompt, "tudo")) {
+        recipe << "whole\n";
+    }
+
+    if (contains_norm(prompt, "borracha") || contains_norm(prompt, "apagar")) {
+        recipe << "tool eraser\n";
+    } else if (contains_norm(prompt, "balde") || contains_norm(prompt, "preencher")) {
+        recipe << "tool bucket\n";
+    } else if (contains_norm(prompt, "lapis") || contains_norm(prompt, "pincel") || contains_norm(prompt, "desenhar") || contains_norm(prompt, "pintar")) {
+        recipe << "tool pencil\n";
+    }
+
+    COLORREF parsed = parse_hex_color(prompt, g_app.brush_color);
+    if (parsed != g_app.brush_color || prompt.find('#') != std::string::npos) {
+        wchar_t color[16] = {};
+        swprintf_s(color, L"#%02X%02X%02X", GetRValue(parsed), GetGValue(parsed), GetBValue(parsed));
+        recipe << "color " << narrow(color) << "\n";
+    }
+
+    int size = number_after_any(prompt, {"tamanho", "size", "pincel"}, -1);
+    if (size >= 0) {
+        recipe << "size " << size << "\n";
+    }
+    int opacity = number_after_any(prompt, {"opacidade", "opacity", "transparencia", "transparencia"}, -1);
+    if (opacity >= 0) {
+        recipe << "opacity " << opacity << "\n";
+    }
+    int tolerance = number_after_any(prompt, {"confianca", "confiança", "tolerancia", "tolerance"}, -1);
+    if (tolerance >= 0) {
+        recipe << "tolerance " << tolerance << "\n";
+    }
+    if (contains_norm(prompt, "quadrado") || contains_norm(prompt, "square")) {
+        recipe << "shape square\n";
+    } else if (contains_norm(prompt, "redondo") || contains_norm(prompt, "round")) {
+        recipe << "shape round\n";
+    }
+    if (contains_norm(prompt, "limpar") || contains_norm(prompt, "apagar parte")) {
+        recipe << "clear\n";
+    } else if (contains_norm(prompt, "preencher") || contains_norm(prompt, "encher") || contains_norm(prompt, "fill")) {
+        recipe << "fill\n";
+    }
+    return recipe.str();
+}
+
+bool execute_genus_recipe(const std::string& recipe, std::wstring* report = nullptr) {
+    bool changed_image = false;
+    bool changed_state = false;
+    for (std::string line : split_recipe_lines(recipe)) {
+        std::string norm = normalize_text(line);
+        std::istringstream in(norm);
+        std::string command;
+        in >> command;
+        std::string rest;
+        std::getline(in, rest);
+
+        if (command == "template") {
+            int index = find_template_index_by_text(rest);
+            if (index >= 0 && index != g_app.selected_template) {
+                g_app.selected_template = index;
+                g_app.selected_part = 0;
+                rebuild_parts();
+                load_default_image(false);
+                changed_state = true;
+            }
+        } else if (command == "part") {
+            int index = find_part_index_by_text(rest);
+            if (index >= 0) {
+                g_app.selected_part = index;
+                SendMessageW(g_parts, LB_SETCURSEL, g_app.selected_part, 0);
+                changed_state = true;
+            }
+        } else if (command == "whole" || command == "full") {
+            g_app.selected_part = -1;
+            SendMessageW(g_parts, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+            changed_state = true;
+        } else if (command == "tool") {
+            if (contains_norm(rest, "eraser") || contains_norm(rest, "borracha")) {
+                set_tool(Tool::Eraser);
+            } else if (contains_norm(rest, "bucket") || contains_norm(rest, "balde")) {
+                set_tool(Tool::Bucket);
+            } else if (contains_norm(rest, "pencil") || contains_norm(rest, "lapis") || contains_norm(rest, "pincel")) {
+                set_tool(Tool::Pencil);
+            } else if (contains_norm(rest, "select") || contains_norm(rest, "selecionar")) {
+                set_tool(Tool::Select);
+            }
+            changed_state = true;
+        } else if (command == "size") {
+            g_app.brush_size = clamp_int(number_after_any("size " + rest, {"size"}, g_app.brush_size), 1, 128);
+            changed_state = true;
+        } else if (command == "hardness") {
+            g_app.brush_hardness = clamp_int(number_after_any("hardness " + rest, {"hardness"}, g_app.brush_hardness), 1, 100);
+            changed_state = true;
+        } else if (command == "opacity") {
+            set_active_tool_opacity(number_after_any("opacity " + rest, {"opacity"}, active_tool_opacity()));
+            changed_state = true;
+        } else if (command == "tolerance" || command == "confidence" || command == "confianca") {
+            g_app.bucket_tolerance = clamp_int(number_after_any("tolerance " + rest, {"tolerance"}, g_app.bucket_tolerance), 0, 255);
+            changed_state = true;
+        } else if (command == "shape") {
+            g_app.brush_shape = contains_norm(rest, "square") || contains_norm(rest, "quadrado") ? BrushShape::Square : BrushShape::Round;
+            changed_state = true;
+        } else if (command == "color" || command == "cor") {
+            g_app.brush_color = parse_hex_color(line, g_app.brush_color);
+            changed_state = true;
+        } else if (command == "fill" || command == "preencher") {
+            if (g_app.image) {
+                Tool old_tool = g_app.tool;
+                set_tool(Tool::Bucket);
+                push_undo_snapshot();
+                POINT center = editable_center_screen_point();
+                bucket_fill_at(center.x, center.y);
+                set_tool(old_tool);
+                changed_image = true;
+            }
+        } else if (command == "clear" || command == "limpar") {
+            if (g_app.image) {
+                push_undo_snapshot();
+                clear_editable_area();
+                changed_image = true;
+            }
+        }
+    }
+    sync_tool_controls_after_ai();
+    if (report) {
+        *report = changed_image
+            ? L"Genus executou a receita e alterou a textura."
+            : (changed_state ? L"Genus ajustou o editor pela receita." : L"Genus nao encontrou acoes validas na receita.");
+    }
+    return changed_image || changed_state;
+}
+
+std::vector<std::string> recipe_tokens(const std::string& text) {
+    std::istringstream in(normalize_text(text));
+    std::vector<std::string> tokens;
+    std::string token;
+    while (in >> token) {
+        if (token.size() >= 3) {
+            tokens.push_back(token);
+        }
+    }
+    return tokens;
+}
+
+int similarity_score(const std::string& a, const std::string& b) {
+    std::vector<std::string> left = recipe_tokens(a);
+    std::vector<std::string> right = recipe_tokens(b);
+    int score = 0;
+    for (const std::string& token : left) {
+        if (std::find(right.begin(), right.end(), token) != right.end()) {
+            ++score;
+        }
+    }
+    return score;
+}
+
+std::string json_line_field(const std::string& line, const std::string& key) {
+    std::regex pattern("\"" + key + R"REGEX("\s*:\s*"((?:\\.|[^"])*)")REGEX");
+    std::smatch match;
+    if (std::regex_search(line, match, pattern)) {
+        return unescape_json_string(match[1].str());
+    }
+    return "";
+}
+
+std::string find_trained_genus_recipe(const std::string& request) {
+    fs::path train_file = g_app.root / "IA-TRAIN" / "genus-training.jsonl";
+    std::ifstream file(train_file, std::ios::binary);
+    if (!file) {
+        return "";
+    }
+    int best_score = 0;
+    std::string best_recipe;
+    std::string line;
+    while (std::getline(file, line)) {
+        std::string learned_request = json_line_field(line, "request");
+        std::string recipe = json_line_field(line, "recipe");
+        int score = similarity_score(request, learned_request);
+        if (!recipe.empty() && score > best_score) {
+            best_score = score;
+            best_recipe = recipe;
+        }
+    }
+    return best_score > 0 ? best_recipe : "";
+}
+
 void train_genus() {
     std::wstring prompt = read_control(g_ai_prompt);
     if (prompt.empty()) {
         set_status(L"Digite um pedido para treinar o Genus.");
         return;
+    }
+    std::string recipe = narrow(read_control(g_ai_steps));
+    if (normalize_text(recipe).empty()) {
+        recipe = recipe_from_current_state();
     }
     fs::path train_dir = g_app.root / "IA-TRAIN";
     fs::create_directories(train_dir);
@@ -913,12 +1346,33 @@ void train_genus() {
     std::string template_id = current_template() ? current_template()->id : "";
     std::string part_id = current_part() ? current_part()->id : "";
     file << "{\"agent\":\"Genus\",\"request\":\"" << escape_json(narrow(prompt))
+         << "\",\"recipe\":\"" << escape_json(recipe)
          << "\",\"template\":\"" << escape_json(template_id)
          << "\",\"part\":\"" << escape_json(part_id)
          << "\",\"tool\":\"" << escape_json(narrow(tool_name(g_app.tool)))
          << "\"}\n";
     SetWindowTextW(g_ai_prompt, L"");
-    set_status(L"Genus treinado em IA-TRAIN/genus-training.jsonl.");
+    set_status(L"Genus treinado com pedido + receita em IA-TRAIN/genus-training.jsonl.");
+}
+
+void run_genus() {
+    std::string prompt = narrow(read_control(g_ai_prompt));
+    if (normalize_text(prompt).empty()) {
+        set_status(L"Digite um pedido para o Genus tentar executar.");
+        return;
+    }
+    std::string recipe = find_trained_genus_recipe(prompt);
+    std::wstring source = L"treino";
+    if (recipe.empty()) {
+        recipe = builtin_recipe_from_prompt(prompt);
+        source = L"parser interno";
+    }
+    std::wstring report;
+    if (execute_genus_recipe(recipe, &report)) {
+        set_status(report + L" Fonte: " + source + L".");
+    } else {
+        set_status(L"Genus ainda nao sabe fazer isso. Escreva uma receita no modo-dev e clique em Treinar.");
+    }
 }
 
 void add_part() {
@@ -1018,7 +1472,7 @@ void layout(HWND hwnd) {
     MoveWindow(g_tool_preview, right_x, y, right_panel_w - 24, 136, TRUE);
     y += 154;
 
-    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_apply, g_new_part, g_delete_part, g_part_up, g_part_down, g_save, g_ai_prompt, g_ai_train};
+    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_apply, g_new_part, g_delete_part, g_part_up, g_part_down, g_save, g_ai_prompt, g_ai_steps, g_ai_train, g_ai_run};
     for (HWND child : children) {
         ShowWindow(child, g_app.dev_mode ? SW_SHOW : SW_HIDE);
     }
@@ -1047,8 +1501,10 @@ void layout(HWND hwnd) {
         MoveWindow(g_part_up, right_x, y + 82, (right_panel_w - 34) / 2, 30, TRUE);
         MoveWindow(g_part_down, right_x + (right_panel_w - 34) / 2 + 10, y + 82, (right_panel_w - 34) / 2, 30, TRUE);
         MoveWindow(g_save, right_x, y + 128, right_panel_w - 24, 34, TRUE);
-        MoveWindow(g_ai_prompt, right_x, y + 176, right_panel_w - 118, 28, TRUE);
-        MoveWindow(g_ai_train, right_x + right_panel_w - 106, y + 176, 82, 28, TRUE);
+        MoveWindow(g_ai_prompt, right_x, y + 176, right_panel_w - 24, 28, TRUE);
+        MoveWindow(g_ai_steps, right_x, y + 210, right_panel_w - 24, 58, TRUE);
+        MoveWindow(g_ai_run, right_x, y + 276, (right_panel_w - 34) / 2, 30, TRUE);
+        MoveWindow(g_ai_train, right_x + (right_panel_w - 34) / 2 + 10, y + 276, (right_panel_w - 34) / 2, 30, TRUE);
     } else {
         for (int id = 2001; id <= 2006; ++id) {
             ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
@@ -1629,7 +2085,7 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
     Gdiplus::Font agent_text_font(&brand_family, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
     g.DrawString(L"Agente IA", -1, &agent_title, Gdiplus::PointF(static_cast<float>(agent.X + 12), static_cast<float>(agent.Y + 12)), &brand);
     Gdiplus::StringFormat agent_format;
-    g.DrawString(L"Genus salva pedidos em IA-TRAIN para treino local.", -1, &agent_text_font, Gdiplus::RectF(static_cast<float>(agent.X + 12), static_cast<float>(agent.Y + 34), static_cast<float>(agent.Width - 24), 38.0f), &agent_format, &muted);
+    g.DrawString(L"Genus aprende receitas e tenta aplicar comandos no editor.", -1, &agent_text_font, Gdiplus::RectF(static_cast<float>(agent.X + 12), static_cast<float>(agent.Y + 34), static_cast<float>(agent.Width - 24), 38.0f), &agent_format, &muted);
 
     Rect layers(client.right - UI_RIGHT_PANEL_W + 16, agent.Y - 118, UI_RIGHT_PANEL_W - 32, 98);
     SolidBrush layers_fill(Color(126, 18, 22, 30));
@@ -1845,6 +2301,9 @@ bool is_checked_button(int id) {
 }
 
 void draw_tool_icon(HDC dc, int id, RECT r, COLORREF color) {
+    if (draw_sheet_icon(dc, id, r)) {
+        return;
+    }
     HPEN pen = CreatePen(PS_SOLID, 2, color);
     HGDIOBJ old_pen = SelectObject(dc, pen);
     HBRUSH brush = CreateSolidBrush(color);
@@ -2453,6 +2912,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_CREATE: {
         g_main = hwnd;
         enable_high_resolution_timer();
+        load_tool_icon_sheet();
         g_ui_font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
         g_panel_brush = CreateSolidBrush(RGB(20, 25, 33));
         g_edit_brush = CreateSolidBrush(RGB(16, 20, 27));
@@ -2500,6 +2960,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_part_down = make_button(hwnd, L"Descer", BS_PUSHBUTTON, ID_PART_DOWN);
         g_save = make_button(hwnd, L"Salvar JSON", BS_PUSHBUTTON, ID_SAVE);
         g_ai_prompt = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, ID_AI_PROMPT);
+        g_ai_steps = make_child(hwnd, L"EDIT", L"tool bucket\r\nfill", WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL, ID_AI_STEPS);
+        g_ai_run = make_button(hwnd, L"Tentar", BS_PUSHBUTTON, ID_AI_RUN);
         g_ai_train = make_button(hwnd, L"Treinar", BS_PUSHBUTTON, ID_AI_TRAIN);
         g_options_size = make_child(hwnd, L"EDIT", L"8", WS_BORDER | ES_NUMBER, ID_OPTIONS_SIZE);
         g_options_hardness = make_child(hwnd, L"EDIT", L"100", WS_BORDER | ES_NUMBER, ID_HARDNESS);
@@ -2515,7 +2977,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_opacity_plus = make_button(hwnd, L"+", BS_PUSHBUTTON, ID_OPACITY_PLUS);
         g_tolerance_minus = make_button(hwnd, L"-", BS_PUSHBUTTON, ID_TOLERANCE_MINUS);
         g_tolerance_plus = make_button(hwnd, L"+", BS_PUSHBUTTON, ID_TOLERANCE_PLUS);
-        HWND edits[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_brush_size, g_options_size, g_options_hardness, g_options_opacity, g_options_tolerance, g_ai_prompt};
+        HWND edits[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_brush_size, g_options_size, g_options_hardness, g_options_opacity, g_options_tolerance, g_ai_prompt, g_ai_steps};
         for (HWND edit : edits) {
             subclass_edit(edit);
         }
@@ -2889,6 +3351,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             return 0;
         case ID_AI_TRAIN:
             train_genus();
+            return 0;
+        case ID_AI_RUN:
+            run_genus();
             return 0;
         case ID_SAVE:
             save_templates();
