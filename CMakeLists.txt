@@ -53,7 +53,7 @@ target_compile_definitions(tte PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(tte PRIVATE gdiplus comdlg32)
+    target_link_libraries(tte PRIVATE gdiplus comdlg32 winmm)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_link_options(tte PRIVATE -municode)
     endif()

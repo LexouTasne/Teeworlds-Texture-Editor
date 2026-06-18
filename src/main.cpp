@@ -9,6 +9,7 @@
 #include <windowsx.h>
 #include <commdlg.h>
 #include <gdiplus.h>
+#include <mmsystem.h>
 
 #include <algorithm>
 #include <climits>
@@ -35,7 +36,8 @@ using Gdiplus::SolidBrush;
 enum class Tool {
     Select,
     Pencil,
-    Eraser
+    Eraser,
+    Bucket
 };
 
 enum class BrushShape {
@@ -88,8 +90,12 @@ struct AppState {
     bool hover_canvas = false;
     bool tracking_mouse = false;
     bool tool_panel_open = false;
+    int active_slider = 0;
     double part_scale_x = 1.0;
     double part_scale_y = 1.0;
+    int pencil_opacity = 100;
+    int eraser_opacity = 100;
+    int bucket_tolerance = 24;
     std::unique_ptr<Bitmap> image;
     std::vector<std::unique_ptr<Bitmap>> undo_stack;
     std::vector<std::unique_ptr<Bitmap>> redo_stack;
@@ -100,6 +106,7 @@ struct AppState {
 };
 
 AppState g_app;
+bool g_timer_resolution_enabled = false;
 HWND g_main = nullptr;
 HWND g_templates = nullptr;
 HWND g_parts = nullptr;
@@ -117,6 +124,8 @@ HWND g_delete_part = nullptr;
 HWND g_part_up = nullptr;
 HWND g_part_down = nullptr;
 HWND g_save = nullptr;
+HWND g_ai_prompt = nullptr;
+HWND g_ai_train = nullptr;
 HWND g_open = nullptr;
 HWND g_save_png = nullptr;
 HWND g_reset = nullptr;
@@ -124,6 +133,7 @@ HWND g_show_all = nullptr;
 HWND g_select_tool = nullptr;
 HWND g_pencil_tool = nullptr;
 HWND g_eraser_tool = nullptr;
+HWND g_bucket_tool = nullptr;
 HWND g_color_pick = nullptr;
 HWND g_zoom_out = nullptr;
 HWND g_zoom_label = nullptr;
@@ -141,10 +151,18 @@ HBRUSH g_edit_brush = nullptr;
 HWND g_options_window = nullptr;
 HWND g_options_size = nullptr;
 HWND g_options_hardness = nullptr;
+HWND g_options_opacity = nullptr;
+HWND g_options_tolerance = nullptr;
 HWND g_shape_round = nullptr;
 HWND g_shape_square = nullptr;
 HWND g_options_color = nullptr;
 HWND g_options_close = nullptr;
+HWND g_size_minus = nullptr;
+HWND g_size_plus = nullptr;
+HWND g_opacity_minus = nullptr;
+HWND g_opacity_plus = nullptr;
+HWND g_tolerance_minus = nullptr;
+HWND g_tolerance_plus = nullptr;
 
 constexpr int ID_TEMPLATES = 1001;
 constexpr int ID_PARTS = 1002;
@@ -175,8 +193,22 @@ constexpr int ID_OPTIONS_SIZE = 1026;
 constexpr int ID_OPTIONS_COLOR = 1027;
 constexpr int ID_PART_UP = 1028;
 constexpr int ID_PART_DOWN = 1029;
+constexpr int ID_TOOL_BUCKET = 1030;
+constexpr int ID_OPACITY = 1031;
+constexpr int ID_TOLERANCE = 1032;
+constexpr int ID_SIZE_MINUS = 1033;
+constexpr int ID_SIZE_PLUS = 1034;
+constexpr int ID_OPACITY_MINUS = 1035;
+constexpr int ID_OPACITY_PLUS = 1036;
+constexpr int ID_TOLERANCE_MINUS = 1037;
+constexpr int ID_TOLERANCE_PLUS = 1038;
+constexpr int ID_FRAME_TIMER = 2000;
+constexpr int ID_AI_PROMPT = 2100;
+constexpr int ID_AI_TRAIN = 2101;
 
 constexpr size_t MAX_HISTORY = 400;
+constexpr UINT ACTIVE_FRAME_MS = 8;
+constexpr UINT MINIMIZED_FRAME_MS = 33;
 
 constexpr int UI_MENU_H = 34;
 constexpr int UI_OPTIONS_H = 44;
@@ -291,7 +323,7 @@ void close_tool_panel() {
         return;
     }
     g_app.tool_panel_open = false;
-    HWND controls[] = {g_options_size, g_options_hardness, g_shape_round, g_shape_square, g_options_color, g_options_close};
+    HWND controls[] = {g_options_size, g_options_hardness, g_options_opacity, g_options_tolerance, g_shape_round, g_shape_square, g_options_color, g_options_close, g_size_minus, g_size_plus, g_opacity_minus, g_opacity_plus, g_tolerance_minus, g_tolerance_plus};
     for (HWND control : controls) {
         if (control) {
             ShowWindow(control, SW_HIDE);
@@ -376,6 +408,8 @@ const wchar_t* tool_name(Tool tool) {
         return L"Lapis";
     case Tool::Eraser:
         return L"Borracha";
+    case Tool::Bucket:
+        return L"Balde";
     }
     return L"Ferramenta";
 }
@@ -595,6 +629,36 @@ Part* current_part() {
 
 void set_status(const std::wstring& message) {
     SetWindowTextW(g_status, message.c_str());
+}
+
+void reset_frame_timer(HWND hwnd, bool minimized = false) {
+    SetTimer(hwnd, ID_FRAME_TIMER, minimized ? MINIMIZED_FRAME_MS : ACTIVE_FRAME_MS, nullptr);
+}
+
+void enable_high_resolution_timer() {
+    if (!g_timer_resolution_enabled && timeBeginPeriod(1) == TIMERR_NOERROR) {
+        g_timer_resolution_enabled = true;
+    }
+}
+
+void disable_high_resolution_timer() {
+    if (g_timer_resolution_enabled) {
+        timeEndPeriod(1);
+        g_timer_resolution_enabled = false;
+    }
+}
+
+int active_tool_opacity() {
+    return g_app.tool == Tool::Eraser ? g_app.eraser_opacity : g_app.pencil_opacity;
+}
+
+void set_active_tool_opacity(int value) {
+    value = clamp_int(value, 1, 100);
+    if (g_app.tool == Tool::Eraser) {
+        g_app.eraser_opacity = value;
+    } else {
+        g_app.pencil_opacity = value;
+    }
 }
 
 std::unique_ptr<Bitmap> clone_bitmap(Bitmap* source) {
@@ -832,6 +896,31 @@ void save_templates() {
     set_status(L"JSON salvo em data/templates/teeworlds_textures.json");
 }
 
+void train_genus() {
+    std::wstring prompt = read_control(g_ai_prompt);
+    if (prompt.empty()) {
+        set_status(L"Digite um pedido para treinar o Genus.");
+        return;
+    }
+    fs::path train_dir = g_app.root / "IA-TRAIN";
+    fs::create_directories(train_dir);
+    fs::path train_file = train_dir / "genus-training.jsonl";
+    std::ofstream file(train_file, std::ios::binary | std::ios::app);
+    if (!file) {
+        set_status(L"Falha ao abrir IA-TRAIN/genus-training.jsonl.");
+        return;
+    }
+    std::string template_id = current_template() ? current_template()->id : "";
+    std::string part_id = current_part() ? current_part()->id : "";
+    file << "{\"agent\":\"Genus\",\"request\":\"" << escape_json(narrow(prompt))
+         << "\",\"template\":\"" << escape_json(template_id)
+         << "\",\"part\":\"" << escape_json(part_id)
+         << "\",\"tool\":\"" << escape_json(narrow(tool_name(g_app.tool)))
+         << "\"}\n";
+    SetWindowTextW(g_ai_prompt, L"");
+    set_status(L"Genus treinado em IA-TRAIN/genus-training.jsonl.");
+}
+
 void add_part() {
     TextureTemplate* texture = current_template();
     if (!texture) {
@@ -903,6 +992,7 @@ void layout(HWND hwnd) {
     MoveWindow(g_select_tool, 9, content_top + 10, 40, 36, TRUE);
     MoveWindow(g_pencil_tool, 9, content_top + 54, 40, 36, TRUE);
     MoveWindow(g_eraser_tool, 9, content_top + 98, 40, 36, TRUE);
+    MoveWindow(g_bucket_tool, 9, content_top + 142, 40, 36, TRUE);
 
     HWND brush_label = GetDlgItem(hwnd, 2007);
     MoveWindow(brush_label, canvas_x, UI_MENU_H + 12, 58, 22, TRUE);
@@ -928,7 +1018,7 @@ void layout(HWND hwnd) {
     MoveWindow(g_tool_preview, right_x, y, right_panel_w - 24, 136, TRUE);
     y += 154;
 
-    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_apply, g_new_part, g_delete_part, g_part_up, g_part_down, g_save};
+    HWND children[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_apply, g_new_part, g_delete_part, g_part_up, g_part_down, g_save, g_ai_prompt, g_ai_train};
     for (HWND child : children) {
         ShowWindow(child, g_app.dev_mode ? SW_SHOW : SW_HIDE);
     }
@@ -957,6 +1047,8 @@ void layout(HWND hwnd) {
         MoveWindow(g_part_up, right_x, y + 82, (right_panel_w - 34) / 2, 30, TRUE);
         MoveWindow(g_part_down, right_x + (right_panel_w - 34) / 2 + 10, y + 82, (right_panel_w - 34) / 2, 30, TRUE);
         MoveWindow(g_save, right_x, y + 128, right_panel_w - 24, 34, TRUE);
+        MoveWindow(g_ai_prompt, right_x, y + 176, right_panel_w - 118, 28, TRUE);
+        MoveWindow(g_ai_train, right_x + right_panel_w - 106, y + 176, 82, 28, TRUE);
     } else {
         for (int id = 2001; id <= 2006; ++id) {
             ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
@@ -1087,6 +1179,31 @@ Rect part_to_source_rect(const Part& part) {
         std::max(1, static_cast<int>(std::round(part.h * g_app.part_scale_y))));
 }
 
+Rect editable_source_rect() {
+    if (!g_app.image) {
+        return Rect();
+    }
+    if (Part* part = current_part()) {
+        Rect src = part_to_source_rect(*part);
+        int max_w = static_cast<int>(g_app.image->GetWidth());
+        int max_h = static_cast<int>(g_app.image->GetHeight());
+        int x = clamp_int(src.X, 0, std::max(0, max_w - 1));
+        int y = clamp_int(src.Y, 0, std::max(0, max_h - 1));
+        int right = clamp_int(src.X + src.Width, x + 1, max_w);
+        int bottom = clamp_int(src.Y + src.Height, y + 1, max_h);
+        return Rect(x, y, right - x, bottom - y);
+    }
+    return Rect(0, 0, static_cast<int>(g_app.image->GetWidth()), static_cast<int>(g_app.image->GetHeight()));
+}
+
+bool image_point_inside_editable(const POINT& point) {
+    if (!image_point_inside(point)) {
+        return false;
+    }
+    Rect edit = editable_source_rect();
+    return point.x >= edit.X && point.y >= edit.Y && point.x < edit.X + edit.Width && point.y < edit.Y + edit.Height;
+}
+
 Rect image_rect_to_screen_rect(int x, int y, int w, int h) {
     if (!g_app.image || g_app.image_rect.Width <= 0 || g_app.image_rect.Height <= 0) {
         return canvas_rect(g_main);
@@ -1105,6 +1222,7 @@ void set_tool(Tool tool) {
     SendMessageW(g_select_tool, BM_SETCHECK, tool == Tool::Select ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_pencil_tool, BM_SETCHECK, tool == Tool::Pencil ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_eraser_tool, BM_SETCHECK, tool == Tool::Eraser ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_bucket_tool, BM_SETCHECK, tool == Tool::Bucket ? BST_CHECKED : BST_UNCHECKED, 0);
     invalidate_tool_ui();
     set_status(std::wstring(L"Ferramenta ativa: ") + tool_name(tool));
 }
@@ -1167,16 +1285,19 @@ void fill_brush_stamp(Graphics& image_g, SolidBrush& brush, int center_x, int ce
 
 void paint_at(int screen_x, int screen_y) {
     POINT p = screen_to_image_point(screen_x, screen_y);
-    if (!image_point_inside(p)) {
+    if (!image_point_inside_editable(p)) {
         return;
     }
     g_app.brush_size = clamp_int(get_control_int(g_brush_size, g_app.brush_size), 1, 128);
     Graphics image_g(g_app.image.get());
     image_g.SetSmoothingMode(g_app.brush_shape == BrushShape::Round ? Gdiplus::SmoothingModeAntiAlias : Gdiplus::SmoothingModeNone);
+    Rect edit = editable_source_rect();
+    image_g.SetClip(edit);
     image_g.SetCompositingMode(g_app.tool == Tool::Eraser ? CompositingModeSourceCopy : Gdiplus::CompositingModeSourceOver);
+    int alpha = clamp_int(active_tool_opacity() * 255 / 100, 1, 255);
     Color color = g_app.tool == Tool::Eraser
-        ? Color(0, 0, 0, 0)
-        : Color(255, GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color));
+        ? Color(255 - alpha, 0, 0, 0)
+        : Color(alpha, GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color));
     SolidBrush brush(color);
     int radius = std::max(1, g_app.brush_size);
     fill_brush_stamp(image_g, brush, p.x, p.y, radius);
@@ -1193,17 +1314,20 @@ void paint_at(int screen_x, int screen_y) {
 void paint_stroke(int from_x, int from_y, int to_x, int to_y, Tool tool) {
     POINT start = screen_to_image_point(from_x, from_y);
     POINT end = screen_to_image_point(to_x, to_y);
-    if (!image_point_inside(start) && !image_point_inside(end)) {
+    if (!image_point_inside_editable(start) && !image_point_inside_editable(end)) {
         return;
     }
 
     g_app.brush_size = clamp_int(get_control_int(g_brush_size, g_app.brush_size), 1, 128);
     Graphics image_g(g_app.image.get());
     image_g.SetSmoothingMode(g_app.brush_shape == BrushShape::Round ? Gdiplus::SmoothingModeAntiAlias : Gdiplus::SmoothingModeNone);
+    Rect edit = editable_source_rect();
+    image_g.SetClip(edit);
     image_g.SetCompositingMode(tool == Tool::Eraser ? CompositingModeSourceCopy : Gdiplus::CompositingModeSourceOver);
+    int alpha = clamp_int((tool == Tool::Eraser ? g_app.eraser_opacity : g_app.pencil_opacity) * 255 / 100, 1, 255);
     Color color = tool == Tool::Eraser
-        ? Color(0, 0, 0, 0)
-        : Color(255, GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color));
+        ? Color(255 - alpha, 0, 0, 0)
+        : Color(alpha, GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color));
     SolidBrush brush(color);
 
     int radius = std::max(1, g_app.brush_size);
@@ -1219,7 +1343,7 @@ void paint_stroke(int from_x, int from_y, int to_x, int to_y, Tool tool) {
         int px = start.x + dx * i / steps;
         int py = start.y + dy * i / steps;
         POINT p{px, py};
-        if (!image_point_inside(p)) {
+        if (!image_point_inside_editable(p)) {
             continue;
         }
         int left = px - radius / 2;
@@ -1242,6 +1366,108 @@ void paint_stroke(int from_x, int from_y, int to_x, int to_y, Tool tool) {
         RECT preview = inflated_win_rect(g_app.preview_rect, 4);
         InvalidateRect(g_main, &preview, FALSE);
     }
+}
+
+int color_distance(const Color& a, const Color& b) {
+    return std::abs(static_cast<int>(a.GetR()) - static_cast<int>(b.GetR()))
+        + std::abs(static_cast<int>(a.GetG()) - static_cast<int>(b.GetG()))
+        + std::abs(static_cast<int>(a.GetB()) - static_cast<int>(b.GetB()))
+        + std::abs(static_cast<int>(a.GetA()) - static_cast<int>(b.GetA()));
+}
+
+void bucket_fill_at(int screen_x, int screen_y) {
+    POINT p = screen_to_image_point(screen_x, screen_y);
+    if (!image_point_inside_editable(p)) {
+        return;
+    }
+
+    Rect edit = editable_source_rect();
+    Gdiplus::BitmapData data{};
+    if (g_app.image->LockBits(&edit, Gdiplus::ImageLockModeRead | Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &data) != Gdiplus::Ok) {
+        set_status(L"Nao foi possivel acessar os pixels do balde.");
+        return;
+    }
+
+    auto pixel_at = [&](int x, int y) -> unsigned int* {
+        auto* row = static_cast<unsigned char*>(data.Scan0) + static_cast<ptrdiff_t>(y - edit.Y) * data.Stride;
+        return reinterpret_cast<unsigned int*>(row) + (x - edit.X);
+    };
+    auto pixel_distance = [](unsigned int a, unsigned int b) {
+        int ab = static_cast<int>(a & 0xff);
+        int ag = static_cast<int>((a >> 8) & 0xff);
+        int ar = static_cast<int>((a >> 16) & 0xff);
+        int aa = static_cast<int>((a >> 24) & 0xff);
+        int bb = static_cast<int>(b & 0xff);
+        int bg = static_cast<int>((b >> 8) & 0xff);
+        int br = static_cast<int>((b >> 16) & 0xff);
+        int ba = static_cast<int>((b >> 24) & 0xff);
+        return std::abs(ar - br) + std::abs(ag - bg) + std::abs(ab - bb) + std::abs(aa - ba);
+    };
+
+    unsigned int target = *pixel_at(p.x, p.y);
+    int alpha = clamp_int(g_app.pencil_opacity * 255 / 100, 1, 255);
+    unsigned int fill = (static_cast<unsigned int>(alpha) << 24)
+        | (static_cast<unsigned int>(GetRValue(g_app.brush_color)) << 16)
+        | (static_cast<unsigned int>(GetGValue(g_app.brush_color)) << 8)
+        | static_cast<unsigned int>(GetBValue(g_app.brush_color));
+    if (pixel_distance(target, fill) == 0) {
+        g_app.image->UnlockBits(&data);
+        return;
+    }
+
+    int tolerance = clamp_int(g_app.bucket_tolerance, 0, 255) * 4;
+    int width = edit.Width;
+    int height = edit.Height;
+    std::vector<unsigned char> visited(static_cast<size_t>(width) * height, 0);
+    std::vector<POINT> stack;
+    stack.reserve(4096);
+    stack.push_back(p);
+
+    int dirty_left = p.x;
+    int dirty_top = p.y;
+    int dirty_right = p.x + 1;
+    int dirty_bottom = p.y + 1;
+
+    while (!stack.empty()) {
+        POINT cur = stack.back();
+        stack.pop_back();
+        if (cur.x < edit.X || cur.y < edit.Y || cur.x >= edit.X + edit.Width || cur.y >= edit.Y + edit.Height) {
+            continue;
+        }
+        size_t vi = static_cast<size_t>(cur.y - edit.Y) * width + static_cast<size_t>(cur.x - edit.X);
+        if (visited[vi]) {
+            continue;
+        }
+        visited[vi] = 1;
+
+        unsigned int* current = pixel_at(cur.x, cur.y);
+        if (pixel_distance(*current, target) > tolerance) {
+            continue;
+        }
+
+        *current = fill;
+        int cx_i = static_cast<int>(cur.x);
+        int cy_i = static_cast<int>(cur.y);
+        dirty_left = std::min(dirty_left, cx_i);
+        dirty_top = std::min(dirty_top, cy_i);
+        dirty_right = std::max(dirty_right, cx_i + 1);
+        dirty_bottom = std::max(dirty_bottom, cy_i + 1);
+
+        stack.push_back(POINT{cur.x + 1, cur.y});
+        stack.push_back(POINT{cur.x - 1, cur.y});
+        stack.push_back(POINT{cur.x, cur.y + 1});
+        stack.push_back(POINT{cur.x, cur.y - 1});
+    }
+
+    g_app.image->UnlockBits(&data);
+    Rect dirty = image_rect_to_screen_rect(dirty_left - 2, dirty_top - 2, dirty_right - dirty_left + 4, dirty_bottom - dirty_top + 4);
+    RECT dirty_win = inflated_win_rect(dirty, 8);
+    InvalidateRect(g_main, &dirty_win, FALSE);
+    if (g_app.preview_rect.Width > 0 && g_app.preview_rect.Height > 0) {
+        RECT preview = inflated_win_rect(g_app.preview_rect, 4);
+        InvalidateRect(g_main, &preview, FALSE);
+    }
+    set_status(L"Balde aplicado com confianca " + std::to_wstring(g_app.bucket_tolerance) + L".");
 }
 
 void draw_section_label(Graphics& g, const wchar_t* title, const wchar_t* subtitle, int x, int y, int w) {
@@ -1317,22 +1543,26 @@ void draw_tool_options_panel(Graphics& g) {
         g.FillEllipse(&stamp, cx - preview_size / 2, cy - preview_size / 2, preview_size, preview_size);
     }
 
-    std::wstring title = std::wstring(g_app.tool == Tool::Eraser ? L"Borracha" : L"Lapis") + L" profissional";
+    std::wstring title = std::wstring(g_app.tool == Tool::Eraser ? L"Borracha" : (g_app.tool == Tool::Bucket ? L"Balde" : L"Lapis")) + L" profissional";
     g.DrawString(title.c_str(), -1, &title_font, Gdiplus::PointF(static_cast<float>(panel.X + 132), static_cast<float>(panel.Y + 20)), &title_brush);
     g.DrawString(L"Tamanho:", -1, &label_font, Gdiplus::PointF(static_cast<float>(panel.X + 132), static_cast<float>(panel.Y + 54)), &label_brush);
-    g.DrawString(L"Dureza:", -1, &label_font, Gdiplus::PointF(static_cast<float>(panel.X + 132), static_cast<float>(panel.Y + 100)), &label_brush);
-    g.DrawString(L"Formato", -1, &label_font, Gdiplus::PointF(static_cast<float>(panel.X + 18), static_cast<float>(panel.Y + 136)), &muted);
+    g.DrawString(g_app.tool == Tool::Bucket ? L"Confianca:" : L"Dureza:", -1, &label_font, Gdiplus::PointF(static_cast<float>(panel.X + 132), static_cast<float>(panel.Y + 100)), &label_brush);
+    g.DrawString(L"Opacidade:", -1, &label_font, Gdiplus::PointF(static_cast<float>(panel.X + 132), static_cast<float>(panel.Y + 146)), &label_brush);
+    g.DrawString(g_app.tool == Tool::Bucket ? L"Preenchimento" : L"Formato", -1, &label_font, Gdiplus::PointF(static_cast<float>(panel.X + 18), static_cast<float>(panel.Y + 184)), &muted);
 
     Pen slider(Color(255, 92, 96, 104), 2.0f);
     Pen active(Color(255, 0, 158, 205), 3.0f);
     int size_y = panel.Y + 72;
     int hard_y = panel.Y + 118;
+    int opacity_y = panel.Y + 164;
     int slider_left = panel.X + 132;
     int slider_right = panel.X + 300;
     g.DrawLine(&slider, slider_left, size_y, slider_right, size_y);
     g.DrawLine(&slider, slider_left, hard_y, slider_right, hard_y);
+    g.DrawLine(&slider, slider_left, opacity_y, slider_right, opacity_y);
     g.DrawLine(&active, slider_left, size_y, slider_left + clamp_int(g_app.brush_size, 1, 128) * 168 / 128, size_y);
-    g.DrawLine(&active, slider_left, hard_y, slider_left + clamp_int(g_app.brush_hardness, 1, 100) * 168 / 100, hard_y);
+    g.DrawLine(&active, slider_left, hard_y, slider_left + (g_app.tool == Tool::Bucket ? clamp_int(g_app.bucket_tolerance, 0, 255) * 168 / 255 : clamp_int(g_app.brush_hardness, 1, 100) * 168 / 100), hard_y);
+    g.DrawLine(&active, slider_left, opacity_y, slider_left + clamp_int(active_tool_opacity(), 1, 100) * 168 / 100, opacity_y);
 }
 
 void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repaint) {
@@ -1399,7 +1629,16 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
     Gdiplus::Font agent_text_font(&brand_family, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
     g.DrawString(L"Agente IA", -1, &agent_title, Gdiplus::PointF(static_cast<float>(agent.X + 12), static_cast<float>(agent.Y + 12)), &brand);
     Gdiplus::StringFormat agent_format;
-    g.DrawString(L"Cantinho reservado para o assistente do editor de foto.", -1, &agent_text_font, Gdiplus::RectF(static_cast<float>(agent.X + 12), static_cast<float>(agent.Y + 34), static_cast<float>(agent.Width - 24), 38.0f), &agent_format, &muted);
+    g.DrawString(L"Genus salva pedidos em IA-TRAIN para treino local.", -1, &agent_text_font, Gdiplus::RectF(static_cast<float>(agent.X + 12), static_cast<float>(agent.Y + 34), static_cast<float>(agent.Width - 24), 38.0f), &agent_format, &muted);
+
+    Rect layers(client.right - UI_RIGHT_PANEL_W + 16, agent.Y - 118, UI_RIGHT_PANEL_W - 32, 98);
+    SolidBrush layers_fill(Color(126, 18, 22, 30));
+    Pen layers_border(Color(48, 255, 255, 255), 1.0f);
+    g.FillRectangle(&layers_fill, layers);
+    g.DrawRectangle(&layers_border, layers);
+    g.DrawString(L"Camadas", -1, &agent_title, Gdiplus::PointF(static_cast<float>(layers.X + 12), static_cast<float>(layers.Y + 10)), &brand);
+    g.DrawString(L"Base: Template", -1, &agent_text_font, Gdiplus::PointF(static_cast<float>(layers.X + 12), static_cast<float>(layers.Y + 36)), &muted);
+    g.DrawString(L"Proximo: recorte vira camada editavel.", -1, &agent_text_font, Gdiplus::PointF(static_cast<float>(layers.X + 12), static_cast<float>(layers.Y + 58)), &muted);
 
     Rect canvas = canvas_rect(hwnd);
     SolidBrush canvas_brush(Color(255, 9, 11, 15));
@@ -1483,15 +1722,19 @@ void render_scene(HWND hwnd, Graphics& g, const RECT& client, const RECT& repain
 
     if (g_app.image && g_app.hover_canvas && g_app.tool != Tool::Select) {
         POINT p = screen_to_image_point(g_app.hover_mouse.x, g_app.hover_mouse.y);
-        if (image_point_inside(p)) {
+        if (image_point_inside_editable(p)) {
             double sx = static_cast<double>(g_app.image_rect.Width) / g_app.image->GetWidth();
             double sy = static_cast<double>(g_app.image_rect.Height) / g_app.image->GetHeight();
             int size = std::max(4, static_cast<int>(std::round(g_app.brush_size * std::max(sx, sy))));
             int left = g_app.hover_mouse.x - size / 2;
             int top = g_app.hover_mouse.y - size / 2;
-            Pen outline(g_app.tool == Tool::Eraser ? Color(240, 255, 120, 120) : Color(240, 255, 255, 255), 1.5f);
-            SolidBrush fill(g_app.tool == Tool::Eraser ? Color(55, 255, 80, 80) : Color(55, GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color)));
-            if (g_app.brush_shape == BrushShape::Square) {
+            Pen outline(g_app.tool == Tool::Eraser ? Color(240, 255, 120, 120) : (g_app.tool == Tool::Bucket ? Color(240, 0, 190, 240) : Color(240, 255, 255, 255)), 1.5f);
+            SolidBrush fill(g_app.tool == Tool::Eraser ? Color(55, 255, 80, 80) : Color(g_app.tool == Tool::Bucket ? 32 : 55, GetRValue(g_app.brush_color), GetGValue(g_app.brush_color), GetBValue(g_app.brush_color)));
+            if (g_app.tool == Tool::Bucket) {
+                Gdiplus::Point bucket[] = {{g_app.hover_mouse.x - 12, g_app.hover_mouse.y}, {g_app.hover_mouse.x, g_app.hover_mouse.y - 14}, {g_app.hover_mouse.x + 14, g_app.hover_mouse.y}, {g_app.hover_mouse.x, g_app.hover_mouse.y + 14}};
+                g.FillPolygon(&fill, bucket, 4);
+                g.DrawPolygon(&outline, bucket, 4);
+            } else if (g_app.brush_shape == BrushShape::Square) {
                 g.FillRectangle(&fill, left, top, size, size);
                 g.DrawRectangle(&outline, left, top, size, size);
             } else {
@@ -1581,7 +1824,7 @@ HWND make_button(HWND parent, const wchar_t* text, DWORD style, int id) {
 }
 
 void invalidate_tool_ui() {
-    HWND buttons[] = {g_select_tool, g_pencil_tool, g_eraser_tool, g_color_pick, g_tool_preview, g_shape_round, g_shape_square};
+    HWND buttons[] = {g_select_tool, g_pencil_tool, g_eraser_tool, g_bucket_tool, g_color_pick, g_tool_preview, g_shape_round, g_shape_square};
     for (HWND hwnd : buttons) {
         if (hwnd) {
             InvalidateRect(hwnd, nullptr, TRUE);
@@ -1594,7 +1837,7 @@ bool is_checked_button(int id) {
         HWND button = id == ID_SHAPE_ROUND ? g_shape_round : g_shape_square;
         return button && SendMessageW(button, BM_GETCHECK, 0, 0) == BST_CHECKED;
     }
-    if (id == ID_DEV || id == ID_SHOW_ALL || id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER) {
+    if (id == ID_DEV || id == ID_SHOW_ALL || id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER || id == ID_TOOL_BUCKET) {
         HWND button = GetDlgItem(g_main, id);
         return button && SendMessageW(button, BM_GETCHECK, 0, 0) == BST_CHECKED;
     }
@@ -1620,6 +1863,10 @@ void draw_tool_icon(HDC dc, int id, RECT r, COLORREF color) {
         RoundRect(dc, cx - 9, cy - 6, cx + 9, cy + 7, 4, 4);
         MoveToEx(dc, cx - 2, cy - 7, nullptr);
         LineTo(dc, cx + 8, cy + 5);
+    } else if (id == ID_TOOL_BUCKET) {
+        POINT pts[] = {{cx - 8, cy - 2}, {cx + 2, cy - 10}, {cx + 10, cy - 2}, {cx, cy + 8}};
+        Polygon(dc, pts, 4);
+        Ellipse(dc, cx + 6, cy + 6, cx + 12, cy + 12);
     } else if (id == ID_ZOOM_IN || id == ID_ZOOM_OUT) {
         Ellipse(dc, cx - 7, cy - 7, cx + 5, cy + 5);
         MoveToEx(dc, cx + 4, cy + 4, nullptr);
@@ -1739,10 +1986,10 @@ void draw_owner_button(const DRAWITEMSTRUCT* item) {
     }
 
     int id = static_cast<int>(item->CtlID);
-    bool has_icon = id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER || id == ID_ZOOM_IN || id == ID_ZOOM_OUT;
+    bool has_icon = id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER || id == ID_TOOL_BUCKET || id == ID_ZOOM_IN || id == ID_ZOOM_OUT;
     if (has_icon) {
         draw_tool_icon(item->hDC, id, r, text);
-        if ((r.right - r.left) <= 48 && (id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER)) {
+        if ((r.right - r.left) <= 48 && (id == ID_TOOL_SELECT || id == ID_TOOL_PENCIL || id == ID_TOOL_ERASER || id == ID_TOOL_BUCKET)) {
             return;
         }
         r.left += 28;
@@ -1817,7 +2064,9 @@ void draw_tool_preview(const DRAWITEMSTRUCT* item) {
     meta.top += 30;
     meta.bottom = meta.top + 18;
     SetTextColor(item->hDC, RGB(166, 166, 170));
-    std::wstring brush_meta = L"Brush " + std::to_wstring(g_app.brush_size) + L"px  " + brush_shape_name(g_app.brush_shape);
+    std::wstring brush_meta = g_app.tool == Tool::Bucket
+        ? L"Confianca " + std::to_wstring(g_app.bucket_tolerance) + L"  Opacidade " + std::to_wstring(g_app.pencil_opacity) + L"%"
+        : L"Brush " + std::to_wstring(g_app.brush_size) + L"px  " + brush_shape_name(g_app.brush_shape) + L"  " + std::to_wstring(active_tool_opacity()) + L"%";
     DrawTextW(item->hDC, brush_meta.c_str(), -1, &meta, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     RECT color_swatch{r.right - 40, r.top + 12, r.right - 16, r.top + 36};
@@ -1848,6 +2097,13 @@ void draw_tool_preview(const DRAWITEMSTRUCT* item) {
         }
         SelectObject(item->hDC, old_b);
         DeleteObject(eraser);
+    } else if (g_app.tool == Tool::Bucket) {
+        HBRUSH brush = CreateSolidBrush(g_app.brush_color);
+        HGDIOBJ old_b = SelectObject(item->hDC, brush);
+        POINT pts[] = {{cx - 16, cy - 2}, {cx - 2, cy - 18}, {cx + 16, cy - 2}, {cx, cy + 16}};
+        Polygon(item->hDC, pts, 4);
+        SelectObject(item->hDC, old_b);
+        DeleteObject(brush);
     } else if (g_app.tool == Tool::Pencil) {
         HBRUSH brush = CreateSolidBrush(g_app.brush_color);
         HGDIOBJ old_b = SelectObject(item->hDC, brush);
@@ -1883,6 +2139,12 @@ void sync_options_controls() {
     if (g_options_hardness) {
         set_control_int_if_changed(g_options_hardness, g_app.brush_hardness);
     }
+    if (g_options_opacity) {
+        set_control_int_if_changed(g_options_opacity, active_tool_opacity());
+    }
+    if (g_options_tolerance) {
+        set_control_int_if_changed(g_options_tolerance, g_app.bucket_tolerance);
+    }
     if (g_shape_round) {
         SendMessageW(g_shape_round, BM_SETCHECK, g_app.brush_shape == BrushShape::Round ? BST_CHECKED : BST_UNCHECKED, 0);
     }
@@ -1893,7 +2155,7 @@ void sync_options_controls() {
 }
 
 void layout_tool_panel_controls(HWND hwnd) {
-    HWND controls[] = {g_options_size, g_options_hardness, g_shape_round, g_shape_square, g_options_color, g_options_close};
+    HWND controls[] = {g_options_size, g_options_hardness, g_options_opacity, g_options_tolerance, g_shape_round, g_shape_square, g_options_color, g_options_close, g_size_minus, g_size_plus, g_opacity_minus, g_opacity_plus, g_tolerance_minus, g_tolerance_plus};
     int show = g_app.tool_panel_open ? SW_SHOW : SW_HIDE;
     for (HWND control : controls) {
         if (control) {
@@ -1906,13 +2168,78 @@ void layout_tool_panel_controls(HWND hwnd) {
 
     Rect panel = g_app.tool_panel_rect;
     MoveWindow(g_options_size, panel.X + 246, panel.Y + 36, 58, 26, TRUE);
+    MoveWindow(g_size_minus, panel.X + 310, panel.Y + 36, 26, 26, TRUE);
+    MoveWindow(g_size_plus, panel.X + 340, panel.Y + 36, 26, 26, TRUE);
     MoveWindow(g_options_hardness, panel.X + 246, panel.Y + 82, 58, 26, TRUE);
+    MoveWindow(g_options_opacity, panel.X + 246, panel.Y + 128, 58, 26, TRUE);
+    MoveWindow(g_opacity_minus, panel.X + 310, panel.Y + 128, 26, 26, TRUE);
+    MoveWindow(g_opacity_plus, panel.X + 340, panel.Y + 128, 26, 26, TRUE);
+    MoveWindow(g_options_tolerance, panel.X + 246, panel.Y + 82, 58, 26, TRUE);
+    MoveWindow(g_tolerance_minus, panel.X + 310, panel.Y + 82, 26, 26, TRUE);
+    MoveWindow(g_tolerance_plus, panel.X + 340, panel.Y + 82, 26, 26, TRUE);
     MoveWindow(g_options_close, panel.X + panel.Width - 36, panel.Y + 10, 24, 24, TRUE);
-    MoveWindow(g_shape_round, panel.X + 18, panel.Y + 158, 92, 30, TRUE);
-    MoveWindow(g_shape_square, panel.X + 118, panel.Y + 158, 98, 30, TRUE);
-    MoveWindow(g_options_color, panel.X + 226, panel.Y + 158, 78, 30, TRUE);
+    MoveWindow(g_shape_round, panel.X + 18, panel.Y + 202, 92, 30, TRUE);
+    MoveWindow(g_shape_square, panel.X + 118, panel.Y + 202, 98, 30, TRUE);
+    MoveWindow(g_options_color, panel.X + 226, panel.Y + 202, 78, 30, TRUE);
+    ShowWindow(g_options_color, (g_app.tool == Tool::Eraser || !g_app.tool_panel_open) ? SW_HIDE : show);
+    ShowWindow(g_shape_round, (g_app.tool == Tool::Bucket || !g_app.tool_panel_open) ? SW_HIDE : show);
+    ShowWindow(g_shape_square, (g_app.tool == Tool::Bucket || !g_app.tool_panel_open) ? SW_HIDE : show);
+    ShowWindow(g_options_hardness, (g_app.tool == Tool::Bucket || !g_app.tool_panel_open) ? SW_HIDE : show);
+    ShowWindow(g_options_tolerance, (g_app.tool == Tool::Bucket && g_app.tool_panel_open) ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_tolerance_minus, (g_app.tool == Tool::Bucket && g_app.tool_panel_open) ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_tolerance_plus, (g_app.tool == Tool::Bucket && g_app.tool_panel_open) ? SW_SHOW : SW_HIDE);
     sync_options_controls();
     InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+bool update_tool_panel_slider(int x, int y, bool begin_drag) {
+    if (!g_app.tool_panel_open) {
+        return false;
+    }
+    Rect panel = g_app.tool_panel_rect;
+    int slider_left = panel.X + 132;
+    int slider_right = panel.X + 300;
+    auto near_line = [&](int line_y) {
+        return x >= slider_left - 8 && x <= slider_right + 8 && y >= line_y - 9 && y <= line_y + 9;
+    };
+    auto value_from_x = [&](int min_value, int max_value) {
+        int clamped = clamp_int(x, slider_left, slider_right);
+        return min_value + (clamped - slider_left) * (max_value - min_value) / std::max(1, slider_right - slider_left);
+    };
+
+    if (begin_drag) {
+        if (near_line(panel.Y + 72)) {
+            g_app.active_slider = 1;
+        } else if (near_line(panel.Y + 118)) {
+            g_app.active_slider = g_app.tool == Tool::Bucket ? 4 : 2;
+        } else if (near_line(panel.Y + 164)) {
+            g_app.active_slider = 3;
+        } else {
+            return false;
+        }
+        SetCapture(g_main);
+    }
+
+    switch (g_app.active_slider) {
+    case 1:
+        g_app.brush_size = clamp_int(value_from_x(1, 128), 1, 128);
+        set_control_int_if_changed(g_brush_size, g_app.brush_size);
+        break;
+    case 2:
+        g_app.brush_hardness = clamp_int(value_from_x(1, 100), 1, 100);
+        break;
+    case 3:
+        set_active_tool_opacity(value_from_x(1, 100));
+        break;
+    case 4:
+        g_app.bucket_tolerance = clamp_int(value_from_x(0, 255), 0, 255);
+        break;
+    default:
+        return false;
+    }
+    sync_options_controls();
+    InvalidateRect(g_main, nullptr, FALSE);
+    return true;
 }
 
 void draw_options_panel(HWND hwnd, HDC dc) {
@@ -2088,7 +2415,7 @@ void show_options_window(POINT screen_pos = POINT{-1, -1}) {
     GetClientRect(g_main, &client);
     Rect canvas = canvas_rect(g_main);
     constexpr int panel_w = 410;
-    constexpr int panel_h = 210;
+    constexpr int panel_h = 248;
     int x = screen_pos.x >= 0 ? screen_pos.x : canvas.X + 340;
     int y = screen_pos.y >= 0 ? screen_pos.y : canvas.Y + 260;
     x = clamp_int(x, canvas.X + 12, std::max(canvas.X + 12, static_cast<int>(client.right) - panel_w - UI_RIGHT_PANEL_W - 20));
@@ -2125,6 +2452,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     switch (message) {
     case WM_CREATE: {
         g_main = hwnd;
+        enable_high_resolution_timer();
         g_ui_font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
         g_panel_brush = CreateSolidBrush(RGB(20, 25, 33));
         g_edit_brush = CreateSolidBrush(RGB(16, 20, 27));
@@ -2134,6 +2462,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_select_tool = make_button(hwnd, L"Selecionar", BS_AUTORADIOBUTTON, ID_TOOL_SELECT);
         g_pencil_tool = make_button(hwnd, L"Lapis", BS_AUTORADIOBUTTON, ID_TOOL_PENCIL);
         g_eraser_tool = make_button(hwnd, L"Borracha", BS_AUTORADIOBUTTON, ID_TOOL_ERASER);
+        g_bucket_tool = make_button(hwnd, L"Balde", BS_AUTORADIOBUTTON, ID_TOOL_BUCKET);
         g_color_pick = make_button(hwnd, L"Cor", BS_PUSHBUTTON, ID_COLOR_PICK);
         g_zoom_out = make_button(hwnd, L"-", BS_PUSHBUTTON, ID_ZOOM_OUT);
         g_zoom_label = make_child(hwnd, L"STATIC", L"Fit", SS_CENTER, 0);
@@ -2170,13 +2499,23 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_part_up = make_button(hwnd, L"Subir", BS_PUSHBUTTON, ID_PART_UP);
         g_part_down = make_button(hwnd, L"Descer", BS_PUSHBUTTON, ID_PART_DOWN);
         g_save = make_button(hwnd, L"Salvar JSON", BS_PUSHBUTTON, ID_SAVE);
+        g_ai_prompt = make_child(hwnd, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, ID_AI_PROMPT);
+        g_ai_train = make_button(hwnd, L"Treinar", BS_PUSHBUTTON, ID_AI_TRAIN);
         g_options_size = make_child(hwnd, L"EDIT", L"8", WS_BORDER | ES_NUMBER, ID_OPTIONS_SIZE);
         g_options_hardness = make_child(hwnd, L"EDIT", L"100", WS_BORDER | ES_NUMBER, ID_HARDNESS);
+        g_options_opacity = make_child(hwnd, L"EDIT", L"100", WS_BORDER | ES_NUMBER, ID_OPACITY);
+        g_options_tolerance = make_child(hwnd, L"EDIT", L"24", WS_BORDER | ES_NUMBER, ID_TOLERANCE);
         g_shape_round = make_button(hwnd, L"Redondo", BS_AUTORADIOBUTTON, ID_SHAPE_ROUND);
         g_shape_square = make_button(hwnd, L"Quadrado", BS_AUTORADIOBUTTON, ID_SHAPE_SQUARE);
         g_options_color = make_button(hwnd, L"Cor", BS_PUSHBUTTON, ID_OPTIONS_COLOR);
         g_options_close = make_button(hwnd, L"X", BS_PUSHBUTTON, ID_OPTIONS_CLOSE);
-        HWND edits[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_brush_size, g_options_size, g_options_hardness};
+        g_size_minus = make_button(hwnd, L"-", BS_PUSHBUTTON, ID_SIZE_MINUS);
+        g_size_plus = make_button(hwnd, L"+", BS_PUSHBUTTON, ID_SIZE_PLUS);
+        g_opacity_minus = make_button(hwnd, L"-", BS_PUSHBUTTON, ID_OPACITY_MINUS);
+        g_opacity_plus = make_button(hwnd, L"+", BS_PUSHBUTTON, ID_OPACITY_PLUS);
+        g_tolerance_minus = make_button(hwnd, L"-", BS_PUSHBUTTON, ID_TOLERANCE_MINUS);
+        g_tolerance_plus = make_button(hwnd, L"+", BS_PUSHBUTTON, ID_TOLERANCE_PLUS);
+        HWND edits[] = {g_id, g_label, g_x, g_y, g_w, g_h, g_brush_size, g_options_size, g_options_hardness, g_options_opacity, g_options_tolerance, g_ai_prompt};
         for (HWND edit : edits) {
             subclass_edit(edit);
         }
@@ -2188,11 +2527,30 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         rebuild_templates();
         load_default_image();
         layout(hwnd);
+        reset_frame_timer(hwnd, false);
         return 0;
     }
     case WM_SIZE:
+        reset_frame_timer(hwnd, wparam == SIZE_MINIMIZED);
         layout(hwnd);
         return 0;
+    case WM_TIMER:
+        if (wparam == ID_FRAME_TIMER && !IsIconic(hwnd)) {
+            if (g_app.hover_canvas || g_app.drawing || g_app.panning || g_app.tool_panel_open) {
+                Rect canvas = canvas_rect(hwnd);
+                int hover_size = std::max(64, g_app.brush_size + 34);
+                RECT dirty{g_app.hover_mouse.x - hover_size, g_app.hover_mouse.y - hover_size, g_app.hover_mouse.x + hover_size, g_app.hover_mouse.y + hover_size};
+                RECT hud_rect{canvas.X + 8, canvas.Y + canvas.Height - 42, canvas.X + 430, canvas.Y + canvas.Height - 4};
+                InvalidateRect(hwnd, &dirty, FALSE);
+                InvalidateRect(hwnd, &hud_rect, FALSE);
+                if (g_app.tool_panel_open) {
+                    RECT panel = inflated_win_rect(g_app.tool_panel_rect, 16);
+                    InvalidateRect(hwnd, &panel, FALSE);
+                }
+            }
+            return 0;
+        }
+        break;
     case WM_ERASEBKGND:
         return 1;
     case WM_DRAWITEM:
@@ -2220,11 +2578,15 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             if (!inside_panel) {
                 close_tool_panel();
             } else {
+                update_tool_panel_slider(mx, my, true);
                 return 0;
             }
         }
         if (g_app.tool == Tool::Select) {
             select_part_from_point(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+        } else if (g_app.tool == Tool::Bucket) {
+            push_undo_snapshot();
+            bucket_fill_at(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
         } else {
             push_undo_snapshot();
             g_app.drawing = true;
@@ -2234,6 +2596,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         }
         return 0;
     case WM_LBUTTONUP:
+        if (g_app.active_slider != 0) {
+            g_app.active_slider = 0;
+            ReleaseCapture();
+            return 0;
+        }
         if (g_app.drawing) {
             g_app.drawing = false;
             ReleaseCapture();
@@ -2290,6 +2657,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             int y = GET_Y_LPARAM(lparam);
             paint_stroke(g_app.last_mouse.x, g_app.last_mouse.y, x, y, g_app.tool);
             g_app.last_mouse = {x, y};
+        } else if (g_app.active_slider != 0) {
+            update_tool_panel_slider(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), false);
         } else if (g_app.panning) {
             int x = GET_X_LPARAM(lparam);
             int y = GET_Y_LPARAM(lparam);
@@ -2311,6 +2680,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             }
             RECT hud_rect{canvas.X + 8, canvas.Y + canvas.Height - 42, canvas.X + 390, canvas.Y + canvas.Height - 4};
             InvalidateRect(hwnd, &hud_rect, FALSE);
+            UpdateWindow(hwnd);
         }
         return 0;
     }
@@ -2365,6 +2735,52 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 invalidate_tool_ui();
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
+            return 0;
+        case ID_OPACITY:
+            if (HIWORD(wparam) == EN_CHANGE) {
+                set_active_tool_opacity(get_control_int(g_options_opacity, active_tool_opacity()));
+                invalidate_tool_ui();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        case ID_TOLERANCE:
+            if (HIWORD(wparam) == EN_CHANGE) {
+                g_app.bucket_tolerance = clamp_int(get_control_int(g_options_tolerance, g_app.bucket_tolerance), 0, 255);
+                invalidate_tool_ui();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        case ID_SIZE_MINUS:
+            g_app.brush_size = clamp_int(g_app.brush_size - 1, 1, 128);
+            set_control_int_if_changed(g_brush_size, g_app.brush_size);
+            sync_options_controls();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case ID_SIZE_PLUS:
+            g_app.brush_size = clamp_int(g_app.brush_size + 1, 1, 128);
+            set_control_int_if_changed(g_brush_size, g_app.brush_size);
+            sync_options_controls();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case ID_OPACITY_MINUS:
+            set_active_tool_opacity(active_tool_opacity() - 1);
+            sync_options_controls();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case ID_OPACITY_PLUS:
+            set_active_tool_opacity(active_tool_opacity() + 1);
+            sync_options_controls();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case ID_TOLERANCE_MINUS:
+            g_app.bucket_tolerance = clamp_int(g_app.bucket_tolerance - 1, 0, 255);
+            sync_options_controls();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case ID_TOLERANCE_PLUS:
+            g_app.bucket_tolerance = clamp_int(g_app.bucket_tolerance + 1, 0, 255);
+            sync_options_controls();
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         case ID_SHAPE_ROUND:
             g_app.brush_shape = BrushShape::Round;
@@ -2425,6 +2841,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             close_tool_panel();
             set_tool(Tool::Eraser);
             return 0;
+        case ID_TOOL_BUCKET:
+            close_tool_panel();
+            set_tool(Tool::Bucket);
+            return 0;
         case ID_COLOR_PICK:
             choose_brush_color(hwnd);
             return 0;
@@ -2467,6 +2887,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         case ID_PART_DOWN:
             move_selected_part(1);
             return 0;
+        case ID_AI_TRAIN:
+            train_genus();
+            return 0;
         case ID_SAVE:
             save_templates();
             return 0;
@@ -2488,6 +2911,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             DeleteObject(g_edit_brush);
             g_edit_brush = nullptr;
         }
+        KillTimer(hwnd, ID_FRAME_TIMER);
+        disable_high_resolution_timer();
         PostQuitMessage(0);
         return 0;
     }

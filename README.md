@@ -26,6 +26,12 @@ Em resumo: um editor para parar de procurar sprite no pixel errado como se fosse
 - Imagens padrao em `data/defaults/` para usar mesmo sem carregar PNG externo.
 - Render pixel-perfect: sem esticar textura para preencher tela.
 - Ferramenta Python para criar preview com foco em uma parte da textura.
+- Ferramentas visuais: selecionar, lapis, borracha e balde.
+- Painel interno de ferramenta com sliders, botoes `-`/`+`, opacidade e tolerancia do balde.
+- Loop de UI em 120 FPS quando ativo e 30 FPS quando minimizado para economizar CPU.
+- Desenho, borracha e balde respeitam a `part` selecionada; sem parte selecionada, edita a imagem inteira.
+- Undo/redo com ate 400 snapshots via `Ctrl + Z` e `Ctrl + Y`.
+- Agente `Genus` no modo-dev, salvando pedidos de treino em `IA-TRAIN/`.
 - Copyright e metadados Windows no executavel: `Lex copyright 2026`.
 - Icone customizavel por `.ico` no build.
 - Copia automatica das DLLs do MinGW ao lado do `.exe`.
@@ -102,8 +108,11 @@ Ao abrir `build\tte.exe`:
 - escolha o template na lista da esquerda;
 - escolha uma parte, como `eye_normal`, `gun`, `health` ou `explosion`;
 - clique em `Abrir PNG` para carregar uma textura sua;
-- use `Selecionar`, `Lapis` ou `Borracha` na barra superior;
+- use `Selecionar`, `Lapis`, `Borracha` ou `Balde` na barra lateral;
 - cada ferramenta tem um preview visual no proprio botao;
+- clique com o botao direito no canvas para abrir o painel interno da ferramenta;
+- use os sliders ou os botoes `-`/`+` para tamanho, opacidade, dureza e tolerancia;
+- a borracha nao tem seletor de cor, porque borracha colorida e crise de identidade;
 - use `-`, `+` e `Fit` para controlar o zoom;
 - use `Ctrl + roda do mouse` para zoom rapido;
 - use botao direito e arraste para mover a textura quando estiver com zoom;
@@ -111,12 +120,14 @@ Ao abrir `build\tte.exe`:
 - use o `Modo-dev` na direita para ajustar IDs e coordenadas;
 - use `Pincel` para controlar o tamanho do lapis/borracha;
 - clique em `Aplicar parte` para atualizar a selecao;
+- use `Subir` e `Descer` no modo-dev para mudar a ordem das partes;
+- digite um pedido no campo do `Genus` e clique em `Treinar` para salvar um exemplo em `IA-TRAIN/genus-training.jsonl`;
 - clique em `Salvar JSON` para gravar em `data/templates/teeworlds_textures.json`.
 - clique em `Salvar PNG` para exportar a textura editada.
 
-O foco visual escurece o resto da textura e amplia a parte selecionada no painel de preview.
+O foco visual escurece o resto da textura e amplia a parte selecionada no painel de preview. Enquanto uma parte estiver selecionada, ferramentas de edicao ficam presas naquela area para evitar pintar fora do sprite sem querer.
 
-A interface usa repaint com buffer e atualizacao por regiao suja para evitar aquele efeito de imagem redesenhando de cima para baixo. Clicar no mesmo template tambem nao recarrega a textura inteira sem necessidade.
+A interface usa repaint com buffer, atualizacao por regiao suja e timer de alta resolucao. Em uso normal ela mira 120 FPS; minimizada, cai para 30 FPS para economizar memoria e CPU. Clicar no mesmo template tambem nao recarrega a textura inteira sem necessidade.
 
 Nos campos de texto do modo-dev:
 
@@ -204,7 +215,9 @@ Elas ficam ao lado de `tte.exe`, entao o usuario nao precisa instalar o MSYS2 pa
 
 ## Futuro da IA
 
-A ideia e ter uma IA dentro do editor para:
+O agente do editor se chama `Genus`. Na 0.1, ele registra pedidos de treino em `IA-TRAIN/genus-training.jsonl`, incluindo template, parte selecionada e ferramenta ativa.
+
+A ideia e evoluir o Genus para:
 
 - explicar o que cada parte do template faz;
 - sugerir correcoes de contraste, contorno e alinhamento;
